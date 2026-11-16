@@ -30,7 +30,7 @@ test('real Hydro registry receives independent settings, secret fields and dispo
     const f = settingsContext();
     try {
         const rows = nativeSettings.SYSTEM_SETTINGS.filter(row => row.key.startsWith('hydroCcsApi.'));
-        assert.deepEqual(rows.map(row => row.key).sort(), ['adminApiKey', 'contests', 'password', 'username'].map(key => `hydroCcsApi.${key}`));
+        assert.deepEqual(rows.map(row => row.key).sort(), ['adminApiKey', 'contests', 'organizationIds', 'password', 'username'].map(key => `hydroCcsApi.${key}`));
         assert.ok(rows.every(row => row.family === 'setting_hydro_ccs_api'));
         assert.equal(f.locales.zh.setting_hydro_ccs_api, 'CCS 比赛数据接口');
         for (const key of ['password', 'adminApiKey']) {
@@ -40,8 +40,30 @@ test('real Hydro registry receives independent settings, secret fields and dispo
             assert.ok(row.flag & nativeSettings.FLAG_SECRET);
         }
         assert.equal(nativeSettings.SYSTEM_SETTINGS_BY_KEY['hydroCcsApi.contests'].value, '');
+        assert.equal(nativeSettings.SYSTEM_SETTINGS_BY_KEY['hydroCcsApi.organizationIds'].value, '');
+        assert.equal(nativeSettings.SYSTEM_SETTINGS_BY_KEY['hydroCcsApi.organizationIds'].type, 'textarea');
     } finally { f.dispose(); }
     assert.deepEqual(new Set(nativeSettings.SYSTEM_SETTINGS.map(row => row.key)), existing);
+});
+
+test('organization mapping settings accept JSON text and reject ambiguous or unusable IDs before saving', () => {
+    const f = settingsContext();
+    const save = args => f.hooks['handler/before/SystemSetting']({ request: { method: 'POST' }, args });
+    try {
+        for (const value of ['', ' \n ', '{}', '{\n " 西华师范大学 ": "cwnu", "另一所学校": "School_2-2026"\n}']) {
+            assert.doesNotThrow(() => save({ 'hydroCcsApi.organizationIds': value }));
+            assert.doesNotThrow(() => save({ hydroCcsApi: { organizationIds: value } }));
+        }
+        const invalid = ['{', '[]', 'null', 'true', '42', '"cwnu"', { University: 'uni' }, ['uni'],
+            '{"": "empty"}', '{" ": "blank"}', '{"University": "a", " University ": "b"}',
+            '{"University": "same", "Another": "same"}',
+            ...['', ' cwnu ', '西华师大', '../cwnu', 'a/b', 'a.b', 'a\n', 'a'.repeat(65), 123, null, [], {}]
+                .map(id => JSON.stringify({ University: id }))];
+        for (const value of invalid) {
+            assert.throws(() => save({ 'hydroCcsApi.organizationIds': value }), ValidationError);
+            assert.throws(() => save({ hydroCcsApi: { organizationIds: value } }), ValidationError);
+        }
+    } finally { f.dispose(); }
 });
 
 test('native save hook validates flat and nested settings before any writes', () => {

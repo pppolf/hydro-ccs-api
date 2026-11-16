@@ -1,6 +1,8 @@
 import { ContestModel, getAlphabeticId, ObjectId, ProblemModel, RecordModel, SettingModel, UserModel } from 'hydrooj';
 import { digest, duration, entityKey, hydroVerdicts, judgementTypes, type CcsObject, type CcsState } from './core';
 import { addCcsRuns } from './runs';
+import { ccsOrganizationIds } from './organizations';
+import { ccsSetting } from './settings';
 
 export class CcsError extends Error {
     constructor(public status: number, message: string) { super(message); }
@@ -31,6 +33,9 @@ export function contestObject(contest: any) {
 
 export async function readHydroCcsState(domainId: string, tid: ObjectId, visibility: 'admin' | 'broadcast', previous: CcsState, now = new Date()) {
     const contest = await getCcsContest(domainId, tid);
+    let organizationIds: Map<string, string>;
+    try { organizationIds = ccsOrganizationIds(ccsSetting('organizationIds')); }
+    catch { throw new CcsError(503, 'CCS organization ID mapping is invalid'); }
     const [participants, records, problems] = await Promise.all([
         ContestModel.getMultiStatus(domainId, { docId: tid }).project({ uid: 1, attend: 1, unrank: 1, members: 1, journal: 1 }).toArray(),
         RecordModel.getMulti(domainId, { contest: tid }).project({ _id: 1, uid: 1, pid: 1, lang: 1, status: 1, judgeAt: 1,
@@ -66,8 +71,14 @@ export async function readHydroCcsState(domainId: string, tid: ObjectId, visibil
         owner.set(uid, uid);
         for (const member of participant.members || []) owner.set(member, uid);
         (participant.journal || []).forEach((entry: any, order: number) => journal.set(String(entry.rid), { uid, order, status: entry.status }));
-        const school = String(user?.school || '').trim(), organizationId = school ? digest(school).slice(0, 32) : null;
-        if (organizationId) add('organizations', { id: organizationId, name: school, formal_name: school });
+        const school = String(user?.school || '').trim();
+        const organizationId = school ? organizationIds.get(school) ?? digest(school).slice(0, 32) : null;
+        if (organizationId) {
+            // A configured ID must not overwrite another school's fallback hash.
+            const existing = state.get(entityKey('organizations', organizationId));
+            if (existing && existing.name !== school) throw new CcsError(503, 'CCS organization IDs conflict');
+            add('organizations', { id: organizationId, name: school, formal_name: school });
+        }
         add('teams', { id: user.uname, label: String(user.seat || uid), name: user.displayName || user.uname,
             organization_id: organizationId, group_ids: [participant.unrank ? 'observers' : 'participants'], hidden: maintainers.has(uid),
             x_hydro_username: user.uname,

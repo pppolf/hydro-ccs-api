@@ -44,6 +44,7 @@ hydrooj addon add /opt/hydro-ccs-api
 | CCS 直播用户名 | `ccs` | HTTP Basic 用户名，无需创建同名 Hydro 用户 |
 | CCS 直播密码 | 空 | 直播独立密码；首次未设置时拒绝 Basic 访问 |
 | CCS 允许读取的比赛 | 空 | `域ID/24位比赛ID`，逗号或空白分隔，最多 100 项 |
+| CCS 组织 ID 映射 | 空 | 学校名称到固定组织 ID 的 JSON 对象，便于提前准备直播 package |
 | CCS 未封榜读取密钥 | 空 | 可选 `x-ccs-api-key`；32–1024 个可见 ASCII 字符，不含空白，只读未封榜结果 |
 
 例如：
@@ -61,6 +62,22 @@ Hydro 的密码输入框留空表示**保留原值**。停用比赛读取请清�
 ```sh
 node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 ```
+
+### 组织 ID 与直播素材
+
+默认组织 ID 是学校名称生成的固定哈希，并非乱码。需要提前按学校简称准备 package、校徽等素材时，在 **CCS 组织 ID 映射**（`hydroCcsApi.organizationIds`）中填写：
+
+```json
+{
+  "西华师范大学": "cwnu"
+}
+```
+
+配置后，`organizations` 接口及 event-feed 的组织 ID 都是 `cwnu`，所属队伍的 `organization_id` 也同步为 `cwnu`；组织的 `name` / `formal_name` 仍为“西华师范大学”。可以据此提前准备使用 `cwnu` 的素材。
+
+映射适用于所有域和比赛，按 Hydro 队伍账号的学校名称匹配；配置名称与学校名称均去除首尾空白，其余字符须一致。ID 区分大小写，须为 1–64 个英文字母、数字、下划线或连字符，不同学校不能配置相同 ID。未映射学校继续使用原哈希 ID；没有学校的队伍保持 `organization_id: null`。留空或填写 `{}` 可清除映射。
+
+建议在准备 package、首次连接直播前完成配置。保存后在下一次数据刷新时生效；若已有事件历史，会追加旧组织删除、新组织及队伍更新事件，原 token 仍可续传。**历史事件不会改写**，因此从头读取 event-feed 仍可能先看到旧哈希 ID，再收到映射后的变更；查看当前 ID 可使用 `/organizations` 和 `/teams`。
 
 ## 接口地址
 

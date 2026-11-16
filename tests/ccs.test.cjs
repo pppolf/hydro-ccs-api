@@ -10,7 +10,7 @@ const Koa = hydroRequire('koa');
 
 const { loader } = require('./helpers.cjs');
 const load = loader();
-const { hydroStandings, diffCcsState, entityKey, maskBroadcastEvent } = load('core');
+const { hydroStandings, diffCcsState, entityKey, maskBroadcastEvent, digest, applyCcsChange } = load('core');
 const { CcsFeedStore } = load('store');
 const { ccsBasicAuthorized, ccsApiKeyAuthorized, ccsContestAllowlist } = load('auth');
 const at = seconds => new Date(Date.parse('2026-11-09T03:00:00Z') + seconds * 1000);
@@ -200,6 +200,9 @@ function fixture() {
         response = { status: 200, headers: {}, addHeader(name, value) { this.headers[name] = value; } };
     }
     const problems = { 1: { docId: 1, title: 'A + B', config: { count: 4 } } };
+    const users = { 1: { _id: 1, uname: 'team01', school: 'University', password: 'PRIVATE_PASSWORD' },
+        2: { _id: 2, uname: 'Team02', displayName: 'Team 2' }, 3: { _id: 3, uname: 'member03' },
+        4: { _id: 4, uname: 'star' }, 5: { _id: 0, uname: 'Unknown User' } };
     const hydro = { Handler, Context: class {}, ConnectionHandler: class {}, ObjectId, ValidationError: Error,
         BadRequestError: Error, ForbiddenError: Error, CreateError: () => Error, param: () => () => {}, PERM: {}, PRIV: {}, Types: { ObjectId: {} },
         SystemModel: { get: key => settings[key.replace('hydroCcsApi.', '')] },
@@ -209,9 +212,7 @@ function fixture() {
             getMulti: () => query([contest]), getMultiStatus: () => query(participants) },
         RecordModel: { getMulti: (domain, filter) => { calls.push(['records', domain, filter]); return query(records); } },
         ProblemModel: { getList: async () => structuredClone(problems) },
-        UserModel: { getList: async () => ({ 1: { _id: 1, uname: 'team01', school: 'University', password: 'PRIVATE_PASSWORD' },
-            2: { _id: 2, uname: 'Team02', displayName: 'Team 2' }, 3: { _id: 3, uname: 'member03' },
-            4: { _id: 4, uname: 'star' }, 5: { _id: 0, uname: 'Unknown User' } }) },
+        UserModel: { getList: async () => users },
     };
     const load = loader(hydro), routes = new Map(), hooks = {}, disposers = [], router = new Router();
     router.use(async (c, next) => { c.set('X-Test-Middleware', 'preserved'); await next(); });
@@ -236,7 +237,7 @@ function fixture() {
         const h = new Handler(); h.args = args; h.request.headers = admin ? { 'x-ccs-api-key': 'a'.repeat(64) } : headers;
         await h.get({ domainId: 'acm', contestId: tid, endpoint }); return h;
     }
-    return { contest, records, participants, problems, calls, settings, headers, get, load, routes, hooks, isCcs, hydro, ctx,
+    return { contest, records, participants, problems, users, calls, settings, headers, get, load, routes, hooks, isCcs, hydro, ctx,
         dispose: () => { for (const dispose of disposers.reverse()) dispose(); } };
 }
 
@@ -272,6 +273,8 @@ test('native source exports projected metadata and member ownership; broadcast m
     assert.equal(broadcast.get(`submissions/${oid(1900)}`).x_hydro_username, 'member03');
     assert.deepEqual(broadcast.get('teams/Team02').x_hydro_usernames, ['Team02', 'member03']);
     assert.equal(broadcast.has('teams/Unknown User'), false);
+    assert.equal(broadcast.get('teams/team01').organization_id, digest('University').slice(0, 32));
+    assert.equal(broadcast.get('teams/Team02').organization_id, null);
     assert.doesNotMatch(JSON.stringify([...admin]), /PRIVATE_|compilerText|password/);
     assert.equal(f.calls.find(call => call[0] === 'records')[1], 'acm');
     assert.deepEqual(f.calls.find(call => call[0] === 'records')[2], { contest: new ObjectId(tid) });
@@ -279,6 +282,84 @@ test('native source exports projected metadata and member ownership; broadcast m
     assert.equal((await readHydroCcsState('acm', new ObjectId(tid), 'admin', admin, at(2000))).get(`judgements/hydro-${oid(1900)}`).judgement_type_id, null, 'record result waits for native journal');
     f.contest.rule = 'oi';
     await assert.rejects(readHydroCcsState('acm', new ObjectId(tid), 'admin', admin, at(2000)), /Only fixed-time/);
+});
+
+test('organization mappings keep resource IDs, team references and both event feeds consistent', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
+    const f = fixture();
+    t.after(f.dispose);
+    f.users[1].school = ' 西华师范大学 ';
+    f.users[2].school = '西华师范大学';
+    f.users[4].school = 'University';
+    f.settings.organizationIds = '{" 西华师范大学 ": "cwnu", "未参赛学校": "unused"}';
+    const expected = [{ id: 'cwnu', name: '西华师范大学', formal_name: '西华师范大学' },
+        { id: digest('University').slice(0, 32), name: 'University', formal_name: 'University' }];
+    for (const admin of [false, true]) {
+        assert.deepEqual((await f.get('organizations', admin)).response.body, expected);
+        const teams = (await f.get('teams', admin)).response.body;
+        assert.deepEqual(teams.map(row => [row.id, row.organization_id]),
+            [['team01', 'cwnu'], ['Team02', 'cwnu'], ['star', expected[1].id]]);
+        const events = (await collect((await f.get('event-feed', admin, { stream: 'false' })).response.body)).map(JSON.parse);
+        assert.deepEqual(events.filter(row => row.type === 'organizations').map(row => [row.id, row.data]), expected.map(row => [row.id, row]));
+        assert.deepEqual(events.filter(row => row.type === 'teams').map(row => row.data), teams);
+    }
+    const Handler = f.routes.get('/api/ccs/contests/:contestId/:endpoint/:id'), handler = new Handler();
+    handler.request.headers = f.headers;
+    await handler.get({ domainId: 'acm', contestId: tid, endpoint: 'organizations', id: 'cwnu' });
+    assert.equal(handler.response.status, 200);
+    assert.deepEqual(handler.response.body, expected[0]);
+});
+
+test('adding and clearing organization mappings preserves history and resumes from existing tokens', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
+    const f = fixture();
+    t.after(f.dispose);
+    f.users[1].school = '西华师范大学';
+    const readEvents = async (admin, since_token) => {
+        const response = (await f.get('event-feed', admin, { stream: 'false', since_token })).response;
+        assert.equal(response.status, 200);
+        return (await collect(response.body)).map(JSON.parse);
+    };
+    const originalId = '887d9c342d7da2cb972d74e2afea6341';
+    const baseline = await Promise.all([readEvents(false), readEvents(true)]);
+    assert.equal(baseline[0].find(row => row.type === 'organizations').id, originalId);
+    for (const [mapping, from, to] of [['{"西华师范大学":"cwnu"}', originalId, 'cwnu'], ['', 'cwnu', originalId]]) {
+        f.settings.organizationIds = mapping;
+        for (const admin of [false, true]) {
+            const history = baseline[Number(admin)], updates = await readEvents(admin, history.at(-1).token);
+            assert.deepEqual(updates.map(row => [row.type, row.id, row.data?.organization_id ?? row.data?.id ?? null]),
+                [['organizations', from, null], ['organizations', to, to], ['teams', 'team01', to]]);
+            assert.deepEqual((await f.get('organizations', admin)).response.body, [{ id: to, name: '西华师范大学', formal_name: '西华师范大学' }]);
+            assert.equal((await f.get('teams', admin)).response.body.find(row => row.id === 'team01').organization_id, to);
+            history.push(...updates);
+            assert.deepEqual(await readEvents(admin), history, 'previous events and tokens are immutable');
+            const replay = new Map();
+            for (const event of history) applyCcsChange(replay, event);
+            assert.equal(replay.has(`organizations/${from}`), false);
+            assert.equal(replay.get('teams/team01').organization_id, to);
+            assert.equal(replay.get(`organizations/${to}`).id, to);
+            assert.deepEqual(await readEvents(admin, history.at(-1).token), []);
+        }
+    }
+});
+
+test('invalid organization settings or collisions with fallback IDs publish no partial changes', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
+    const f = fixture();
+    t.after(f.dispose);
+    f.users[1].school = '西华师范大学';
+    f.users[2].school = 'University';
+    const baseline = (await collect((await f.get('event-feed', false, { stream: 'false' })).response.body)).map(JSON.parse);
+    for (const setting of ['{', '{"西华师范大学":"cwnu","University":"cwnu"}',
+        JSON.stringify({ 西华师范大学: digest('University').slice(0, 32) })]) {
+        f.settings.organizationIds = setting;
+        assert.equal((await f.get('organizations')).response.status, 503);
+        assert.equal((await f.get('event-feed', false, { stream: 'false' })).response.status, 503);
+    }
+    f.settings.organizationIds = '';
+    const resumed = (await f.get('event-feed', false, { stream: 'false', since_token: baseline.at(-1).token })).response;
+    assert.equal(resumed.status, 200);
+    assert.deepEqual(await collect(resumed.body), []);
 });
 
 test('JSON resources and NDJSON history both honor freeze, including re-locking; API key and broadcast tokens are isolated', async t => {

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add optional school-name-to-organization-ID mappings in Hydro system settings for preparing broadcast packages (for example, `西华师范大学` → `cwnu`).
+- Keep organization resources, team references and both event-feed views consistent; preserve fallback IDs, historical events and existing resume tokens.
+- Validate mapping syntax, IDs and collisions, with regressions for configuration changes and replay.
+
 ## 1.1.0 — 2026-11-16
 
 - Added `problems.test_data_count`, read-only `runs` resources and test-case events for ICPC Live judging progress.

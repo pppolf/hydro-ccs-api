@@ -85,6 +85,16 @@ HydroJudge 的 `performance` 模式会缓存测试点直到结束；部分版本
 
 CCS 队伍 ID 使用 Hydro 队伍账号用户名，`team_id` 引用相同值；团队成员的提交根据原生 journal 和成员关系归属。比赛管理员账号标记 `hidden: true` 并排除出榜单。打星队保留展示，默认正式排名排除打星队；指定 `group_id=observers` 可取打星独立榜。
 
+## 组织 ID 映射
+
+`hydroCcsApi.organizationIds` 是可选的 JSON 文本配置，例如 `{"西华师范大学":"cwnu"}`。它在所有域、比赛及两种鉴权视图中生效；学校名称来自队伍账号的 `school`，与配置键去除首尾空白后精确匹配。匹配时，`organizations[].id`、组织事件外层 `id` / `data.id` 以及 `teams[].organization_id` 均使用指定 ID；组织显示名称仍使用学校名称。单对象地址也使用该 ID，例如 `/contests/:id/organizations/cwnu`。
+
+ID 须匹配 `[a-zA-Z0-9_-]{1,64}`，区分大小写；配置中的学校名称和目标 ID 均不能重复。未配置学校沿用 `SHA256(JSON.stringify(去除首尾空白后的学校名称))` 的前 32 个十六进制字符，没有学校则不生成组织且队伍 `organization_id` 为 null。只有实际参赛队伍使用到的学校才生成组织。留空或 `{}` 表示不覆盖原 ID。
+
+系统设置保存时校验映射；若绕过设置页写入无效配置，或配置 ID 与另一所学校的默认哈希 ID 冲突，读取比赛数据返回 503，不发布不完整状态。
+
+修改或清除映射在下一次刷新时生成正常的组织删除/新增及队伍更新事件，不改变日志范围、既有事件或 token。`stream=false` 的完整历史仍包含旧 ID，消费者须按顺序应用更新及 `data: null` 删除事件；当前 ID 以 `/organizations`、`/teams` 为准。建议在首次接入直播前配置好映射，按固定 ID 准备 package。
+
 ## 扩展字段与罚时
 
 | 字段 | 说明 |
