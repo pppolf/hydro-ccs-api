@@ -1,5 +1,4 @@
 import { Readable } from 'node:stream';
-import { setTimeout as delay } from 'node:timers/promises';
 import { Context, ContestModel, db, Handler, ObjectId } from 'hydrooj';
 import { ccsApiKeyAuthorized, ccsBasicAuthorized, ccsContestAllowlist } from './auth';
 import { ccsTypes, duration, entities, hydroStandings, maskBroadcastEvent, type CcsChange } from './core';
@@ -21,9 +20,10 @@ const ccsProperties: Record<string, string[]> = {
     languages: ['id', 'name'], groups: ['id', 'name', 'hidden'],
     organizations: ['id', 'name', 'formal_name'],
     teams: ['id', 'label', 'name', 'organization_id', 'group_ids', 'hidden'],
-    problems: ['id', 'label', 'ordinal', 'name', 'color', 'rgb'],
+    problems: ['id', 'label', 'ordinal', 'name', 'test_data_count', 'color', 'rgb'],
     submissions: ['id', 'team_id', 'problem_id', 'language_id', 'time', 'contest_time'],
     judgements: ['id', 'submission_id', 'judgement_type_id', 'start_time', 'start_contest_time', 'end_time', 'end_contest_time'],
+    runs: ['id', 'judgement_id', 'ordinal', 'judgement_type_id', 'time', 'contest_time', 'run_time'],
 };
 
 export function registerCcsApi(ctx: Context) {
@@ -48,6 +48,25 @@ export function registerCcsApi(ctx: Context) {
     const store = new CcsFeedStore(repository);
     const watched = new Map<string, { domainId: string; tid: ObjectId; visibility: 'admin' | 'broadcast'; accessedAt: number }>();
     const streams = new Map<Readable, AbortController>();
+    const revisions = new Map<string, number>();
+    const waiters = new Map<string, Set<() => void>>();
+    function waitForChange(scope: string, through: number, signal: AbortSignal) {
+        if (signal.aborted || (revisions.get(scope) || 0) > through) return Promise.resolve();
+        return new Promise<void>(resolve => {
+            const listeners = waiters.get(scope) || new Set<() => void>();
+            const done = () => {
+                clearTimeout(timer);
+                signal.removeEventListener('abort', done);
+                listeners.delete(done);
+                if (!listeners.size) waiters.delete(scope);
+                resolve();
+            };
+            const timer = setTimeout(done, 2000);
+            listeners.add(done);
+            waiters.set(scope, listeners);
+            signal.addEventListener('abort', done, { once: true });
+        });
+    }
     let disposed = false;
     ctx.effect(() => () => {
         disposed = true;
@@ -56,18 +75,39 @@ export function registerCcsApi(ctx: Context) {
     });
     // Bind tokens to this plugin's independent log, domain, contest and view.
     const scopeFor = (domainId: string, contestId: string, visibility: string) => JSON.stringify([domainId, contestId, visibility, 'hydro-ccs-api-v1']);
-    async function refresh(domainId: string, tid: ObjectId, visibility: 'admin' | 'broadcast', touch = true) {
+    async function refresh(domainId: string, tid: ObjectId, visibility: 'admin' | 'broadcast', touch = true, afterCurrent = false) {
         await ready;
         if (disposed) throw new CcsError(503, 'CCS plugin is shutting down');
         const scope = scopeFor(domainId, String(tid), visibility);
         const watch = watched.get(scope) || { domainId, tid, visibility, accessedAt: Date.now() };
         if (touch) watch.accessedAt = Date.now();
         watched.set(scope, watch);
-        return store.refresh(scope, String(tid), visibility, previous => readHydroCcsState(domainId, tid, visibility, previous));
+        const current = await store.refresh(scope, String(tid), visibility, previous => {
+            if (disposed) throw new CcsError(503, 'CCS plugin is shutting down');
+            return readHydroCcsState(domainId, tid, visibility, previous);
+        }, afterCurrent);
+        if (current.revision > (revisions.get(scope) || 0)) {
+            revisions.set(scope, current.revision);
+            for (const wake of [...(waiters.get(scope) || [])]) wake();
+        }
+        return current;
     }
+    const recordChanged = (record: { domainId: string; contest?: unknown } | null) => {
+        if (disposed || !record?.contest) return;
+        const contestId = String(record.contest);
+        let allowed: string[];
+        try { allowed = ccsContestAllowlist(setting('contests')); } catch { return; }
+        if (!allowed.includes(`${record.domainId}/${contestId}`)) return;
+        return Promise.all([...watched.values()]
+            .filter(watch => watch.domainId === record.domainId && String(watch.tid) === contestId && Date.now() - watch.accessedAt <= 300_000)
+            .map(watch => refresh(watch.domainId, watch.tid, watch.visibility, false, true).catch(() => {})));
+    };
+    ctx.on('record/change', recordChanged);
+    // The final record/change precedes Hydro's contest journal update.
+    ctx.on('record/judge', recordChanged);
     ctx.interval(() => {
         for (const [scope, watch] of watched) {
-            if (Date.now() - watch.accessedAt > 300_000) { watched.delete(scope); continue; }
+            if (Date.now() - watch.accessedAt > 300_000) { watched.delete(scope); revisions.delete(scope); continue; }
             void refresh(watch.domainId, watch.tid, watch.visibility, false).catch(() => {});
         }
     }, 2000);
@@ -136,7 +176,8 @@ export function registerCcsApi(ctx: Context) {
                                 }
                                 if (!streaming) break;
                                 yield '\n'; // heartbeat, also flushes headers for an empty contest
-                                await delay(2000, undefined, { signal: cancellation.signal });
+                                await waitForChange(scope, through, cancellation.signal);
+                                if (cancellation.signal.aborted) break;
                                 self.authenticate(domainId, contestId);
                                 through = (await refresh(domainId, tid, visibility)).revision;
                             } while (!cancellation.signal.aborted);
@@ -174,6 +215,12 @@ export function registerCcsApi(ctx: Context) {
     }
     const root = '/api/ccs';
     ctx.Route('hydro_ccs_api_info', root, CcsHandler);
+    // Hydro registers /api/:op before addons. Give only our exact root route
+    // precedence while preserving the middleware layers and route disposal.
+    const stack = ctx.server.router.stack;
+    const genericApi = stack.findIndex(layer => layer.name === 'api' && layer.path === '/api/:op');
+    const info = stack.findIndex(layer => layer.name === 'hydro_ccs_api_info');
+    if (genericApi >= 0 && info > genericApi) stack.splice(genericApi, 0, stack.splice(info, 1)[0]);
     // A default endpoint argument distinguishes the collection from /api.
     class CcsContestsHandler extends CcsHandler { async get(args: any) { return super.get({ ...args, endpoint: 'contests' }); } }
     ctx.Route('hydro_ccs_api_contests', `${root}/contests`, CcsContestsHandler);

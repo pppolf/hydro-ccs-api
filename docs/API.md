@@ -31,11 +31,12 @@ API 基址为 `/api/ccs`，域内为 `/d/<domain>/api/ccs`。所有资源均为 
 | `/contests/:id/teams` | 队伍、所属组织、组别及隐藏标记 |
 | `/contests/:id/groups` | `participants` 正式队、`observers` 打星队 |
 | `/contests/:id/organizations` | 学校/组织 |
-| `/contests/:id/problems` | 题号、顺序、标题、气球 `color`/`rgb` |
+| `/contests/:id/problems` | 题号、顺序、标题、气球 `color`/`rgb`、可确定时的测试点总数 `test_data_count` |
 | `/contests/:id/languages` | 语言 |
 | `/contests/:id/judgement-types` | 判题类型 |
 | `/contests/:id/submissions` | 提交元数据，不含代码 |
-| `/contests/:id/judgements` | 判题元数据，不含编译日志或测试点 |
+| `/contests/:id/judgements` | 判题状态和最终结果，不含编译日志 |
+| `/contests/:id/runs` | 逐测试点完成结果；不含输入输出、文件路径、测试点消息 |
 | `/contests/:id/<集合>/:objectId` | 上述集合中单个对象 |
 | `/contests/:id/scoreboard` | 正式榜单；可用 `group_id=participants` 或 `group_id=observers` |
 | `/contests/:id/event-feed` | 持续 NDJSON 事件流 |
@@ -56,15 +57,31 @@ GET /api/ccs/contests/<id>/event-feed?since_token=<last-token>
 
 MongoDB 使用 `hydro.ccs.api.commits` 与 `hydro.ccs.api.chunks` 两个独立集合。先写不可变事件块，再提交具有唯一索引的版本；支持独立 Mongo 实例。多进程竞争提交时保留唯一胜出批次。服务重启后从日志恢复，部分失败不会产生成功的空事件历史。
 
-首次访问建立当前比赛快照作为日志基线；每约 2 秒轮询活跃比赛，5 分钟无人读取后停止后台轮询。本插件记录的是**观察到的状态变化**，无法补造首次启用前、停机期间或两个轮询间被覆盖的全部中间判题过程。
+首次访问建立当前比赛快照作为日志基线。对活跃比赛监听 Hydro `record/change` / `record/judge`，收到通知后刷新并在事件提交成功时唤醒流；同时每约 2 秒轮询，以处理通知遗漏、其他进程写入及比赛配置变化。刷新过程中到达的通知会安排后续读取，5 分钟无人读取后停止后台观察。
+
+本插件记录的是**观察到的状态变化**。通知会触发读取当前数据库状态，并不复制一套 Hydro 评测消息队列；并发通知可合并为一次后续读取。首次启用前、停机期间或两次读取之间已被覆盖的过程不能补造；测试点若成批上报，进度也会成批推进。
 
 日志不自动删除。备份时同时保留两个集合；删除日志意味着下游必须丢弃游标并重新建立基线，不应只清理其中一个集合。
+
+## 逐测试点判题进度
+
+1.1.0 新增 `runs`，沿用原日志命名空间和 token；升级后旧游标可继续使用。直播端按所属 `judgement_id` 统计当前 run 对象数量，再除以 `problems.test_data_count`。每次收到相同 run ID 应更新已有对象，`data: null` 应删除对象，不能把事件条数直接当作测试点数量。
+
+`test_data_count` 来自 Hydro 解析后的题目配置，包括引用题目。无法确定有效正整数总数时省略该字段，并不输出该题的 runs。测试点结果仅读取 `id`、`subtaskId`、`status`、`time`；不导出评测消息、文件路径或测试数据。
+
+每个 run 提供 `id`、`judgement_id`、`ordinal`、`judgement_type_id`、`time`、`contest_time`、`run_time`。Hydro 以 `(subtaskId, id)` 标识测试点，插件为这些标识分配并持久保存 `1..test_data_count` 的 ordinal；它是稳定的 CCS 序号，不表示测试点完成先后，也不保证等于 Hydro 页面题号。并行完成、同名子任务测试点和重复通知不会重复累计。观察到重判清空测试点后，会先删除旧 runs，再报告新进度。
+
+`run_time` 将 Hydro 的毫秒耗时转换为秒。Hydro 没有保存每个测试点的墙钟完成时间，因此 `time` / `contest_time` 使用 CCS 首次观察该结果的时间，并以 `x_hydro_time_source: "CCS_OBSERVED"` 标明；重读和重启不会改变未变化结果的时间。这不代表补全了接入前的实际测试点执行历史。
+
+排队、编译、评测中时 `judgement_type_id` 与结束时间保持 null；最终结果等待原生 journal 同步。榜单继续依据 journal 计算，即使重判时实时 record 已经恢复为等待状态。
+
+HydroJudge 的 `performance` 模式会缓存测试点直到结束；部分版本的重判也采用这种批量上报方式。题目 `detail: none`、远端评测机或其他不提供测试点的评测配置可能没有逐点数据。需要实时进度时，应确认评测机逐步上报真实测试点；单独的 `progress` 百分比不能生成可靠的标准 runs。
 
 ## 封榜与队伍
 
 直播视图对**提交时间严格晚于** `lockAt` 的结果隐藏 verdict、结束时间和 Hydro 状态。封榜前提交在封榜后判出的结果仍可见，边界与现有 Hydro 规则一致。
 
-历史事件回放同样按当前封榜策略过滤；提前封榜时间或重新封榜不会通过旧事件泄漏隐藏结果。解封后消费者会得到可见结果更新。
+历史事件回放同样按当前封榜策略过滤；提前封榜时间或重新封榜不会通过旧事件泄漏隐藏结果。封榜后的提交不输出 runs；历史中的对应 run 事件保留 token，但转为 `data: null`，避免结果或测试点完成数量进入直播进度。解封后消费者会得到可见结果与 runs 更新。
 
 CCS 队伍 ID 使用 Hydro 队伍账号用户名，`team_id` 引用相同值；团队成员的提交根据原生 journal 和成员关系归属。比赛管理员账号标记 `hidden: true` 并排除出榜单。打星队保留展示，默认正式排名排除打星队；指定 `group_id=observers` 可取打星独立榜。
 
@@ -76,11 +93,14 @@ CCS 队伍 ID 使用 Hydro 队伍账号用户名，`team_id` 引用相同值；�
 | `contest.x_hydro_time_unit` | `seconds` |
 | `scoreboard.rows[].x_hydro_total_seconds` | Hydro 秒级总罚时 |
 | `problems[].x_hydro_time_seconds`（榜单内） | 首次 AC 的秒数 |
+| `problems[].x_hydro_testcase_order` | 测试点 `subtaskId/id` 的稳定 ordinal 映射；数组下标加 1 为 ordinal，客户端无需解析 |
 | `submissions[].x_hydro_order` | 原生 journal 内顺序，无法确认时为 null |
 | `teams[].x_hydro_username(s)` | 队伍账号及可读成员账号名 |
 | `submissions[].x_hydro_username` | 实际提交者用户名 |
 | `judgements[].x_hydro_status` | 当前可见的 Hydro 判题状态 |
+| `judgements[].x_hydro_journal_status` | 原生榜单使用的可见 journal 状态；重判过程中可能与实时 record 不同 |
 | `judgements[].x_hydro_rank` | 仅未封榜视图：该次 CCS 观察前后的名次及来源信息 |
+| `runs[].x_hydro_time_source` | `CCS_OBSERVED`，测试点事件时间来自 CCS 观察 |
 
 标准 `score.total_time` 与单题 `time` 仍使用整数分钟。按分钟自行重算的客户端可能与 Hydro 秒级名次不同。
 

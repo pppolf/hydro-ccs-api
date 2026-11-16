@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.0 — 2026-11-16
+
+- Added `problems.test_data_count`, read-only `runs` resources and test-case events for ICPC Live judging progress.
+- Refresh active feeds on Hydro `record/change` and `record/judge`, wake connected streams after commits, and retain polling as a fallback.
+- Preserve test-case identities/ordinals across parallel completion, replay and restart; remove old runs when an observed rejudge resets its cases.
+- Keep native journal scoring while exposing pending record states, and apply freeze filtering to current runs and historical replay.
+- Fix `/api/ccs` being intercepted by Hydro's built-in `/api/:op` route.
+- Document judge-side batching limits and add live-progress, freeze, rejudge and resume regressions. Existing log scopes and tokens remain compatible.
+
 ## 1.0.0 — 2026-11-16
 
 - Extracted the Hydro XCPC CCS implementation into an independent addon.

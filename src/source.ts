@@ -1,5 +1,6 @@
 import { ContestModel, getAlphabeticId, ObjectId, ProblemModel, RecordModel, SettingModel, UserModel } from 'hydrooj';
 import { digest, duration, entityKey, hydroVerdicts, judgementTypes, type CcsObject, type CcsState } from './core';
+import { addCcsRuns } from './runs';
 
 export class CcsError extends Error {
     constructor(public status: number, message: string) { super(message); }
@@ -32,8 +33,10 @@ export async function readHydroCcsState(domainId: string, tid: ObjectId, visibil
     const contest = await getCcsContest(domainId, tid);
     const [participants, records, problems] = await Promise.all([
         ContestModel.getMultiStatus(domainId, { docId: tid }).project({ uid: 1, attend: 1, unrank: 1, members: 1, journal: 1 }).toArray(),
-        RecordModel.getMulti(domainId, { contest: tid }).project({ _id: 1, uid: 1, pid: 1, lang: 1, status: 1, judgeAt: 1 }).sort({ _id: 1 }).toArray(),
-        ProblemModel.getMulti(domainId, { docId: { $in: contest.pids } }, ['docId', 'title']).toArray(),
+        RecordModel.getMulti(domainId, { contest: tid }).project({ _id: 1, uid: 1, pid: 1, lang: 1, status: 1, judgeAt: 1,
+            'testCases.id': 1, 'testCases.subtaskId': 1, 'testCases.status': 1, 'testCases.time': 1 }).sort({ _id: 1 }).toArray(),
+        // getList resolves referenced problems and parses their test configuration.
+        ProblemModel.getList(domainId, contest.pids, true, false, ['docId', 'title', 'config']),
     ]);
     const uids = [...new Set<number>(participants.flatMap(row => [row.uid, ...(row.members || [])]).concat(records.map(row => row.uid)))];
     const users = uids.length ? await UserModel.getList(domainId, uids) : {};
@@ -75,7 +78,11 @@ export async function readHydroCcsState(domainId: string, tid: ObjectId, visibil
         const configuredColor = typeof balloon === 'string' ? balloon : balloon?.color;
         const color = typeof configuredColor === 'string' ? configuredColor.trim() : '';
         const colorName = typeof balloon === 'object' && typeof balloon?.name === 'string' ? balloon.name.trim() : '';
-        add('problems', { id: String(pid), label, ordinal, name: problems.find(row => row.docId === pid)?.title || label,
+        const problem = problems[pid], count = typeof problem?.config === 'object' ? problem.config?.count : undefined;
+        const knownCount = Number.isSafeInteger(count) && count! > 0;
+        add('problems', { id: String(pid), label, ordinal, name: problem?.title || label,
+            ...(knownCount ? { test_data_count: count,
+                x_hydro_testcase_order: [...(previous.get(`problems/${pid}`)?.x_hydro_testcase_order || [])].slice(0, count) } : {}),
             color: colorName || color || null, rgb: /^#(?:[\da-f]{3}|[\da-f]{6})$/i.test(color) ? color : null });
     }
     const frozen = visibility === 'broadcast' && contest.lockAt && now > contest.lockAt && !contest.unlocked;
@@ -90,12 +97,19 @@ export async function readHydroCcsState(domainId: string, tid: ObjectId, visibil
         const withheld = frozen && contest.lockAt && submittedAt > contest.lockAt;
         // The native scoreboard is based on the journal. Record and journal
         // updates are not atomic: wait for the journal when a result is newer.
-        const status = withheld ? 0 : entry?.status ?? record.status, verdict = hydroVerdicts[status] || null;
         const judgementId = `hydro-${id}`, old = previous.get(`judgements/${judgementId}`);
+        const journalStatus = withheld ? 0 : entry?.status ?? record.status;
+        const active = [0, 20, 21, 22].includes(record.status);
+        const status = withheld ? 0 : active ? record.status
+            : entry && entry.status !== record.status && old && !old.judgement_type_id ? old.x_hydro_status : journalStatus;
+        const verdict = hydroVerdicts[status] || null;
         const end = verdict ? (record.status === status ? record.judgeAt?.toISOString() : null) || (old?.x_hydro_status === status ? old?.end_time : null) || now.toISOString() : null;
-        add('judgements', { id: judgementId, submission_id: id, judgement_type_id: verdict,
+        const judgement = { id: judgementId, submission_id: id, judgement_type_id: verdict,
             start_time: submittedAt.toISOString(), start_contest_time: duration(+submittedAt - +contest.beginAt),
-            end_time: end, end_contest_time: end ? duration(Date.parse(end) - +contest.beginAt) : null, x_hydro_status: status });
+            end_time: end, end_contest_time: end ? duration(Date.parse(end) - +contest.beginAt) : null,
+            x_hydro_status: status, x_hydro_journal_status: journalStatus };
+        add('judgements', judgement);
+        if (!withheld) addCcsRuns(state, previous, record, judgement, String(record.pid), now);
     }
     if (visibility === 'broadcast') {
         const latest = await getCcsContest(domainId, tid);

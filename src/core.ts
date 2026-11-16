@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 export type CcsObject = Record<string, any>;
 export type CcsChange = { type: string; id: string | null; data: CcsObject | null; token?: string };
 export type CcsState = Map<string, CcsObject>;
-export const ccsTypes = ['contest', 'state', 'judgement-types', 'languages', 'groups', 'organizations', 'teams', 'problems', 'submissions', 'judgements'] as const;
+export const ccsTypes = ['contest', 'state', 'judgement-types', 'languages', 'groups', 'organizations', 'teams', 'problems', 'submissions', 'judgements', 'runs'] as const;
 export const entityKey = (type: string, id: string | null) => `${type}/${id || ''}`;
 export const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export const entities = (state: CcsState, type: string) => [...state.entries()].filter(([key]) => key.startsWith(`${type}/`)).map(([, value]) => value);
@@ -22,12 +22,16 @@ export const judgementTypes = Object.entries(hydroVerdicts).map(([status, id]) =
 // prevents a replay from exposing old results after an organizer moves the
 // freeze earlier or locks an already thawed contest again.
 export function maskBroadcastEvent(event: CcsChange, lockAt: Date | null): CcsChange {
-    if (!lockAt || event.type !== 'judgements' || !event.data) return event;
-    const id = event.data.submission_id;
+    if (!lockAt || !['judgements', 'runs'].includes(event.type) || !event.data) return event;
+    const id = event.type === 'runs' ? /^hydro-([a-f\d]{24})$/.exec(event.data.judgement_id)?.[1] : event.data.submission_id;
     const submittedAt = typeof id === 'string' && /^[a-f\d]{24}$/.test(id) ? parseInt(id.slice(0, 8), 16) * 1000 : Infinity;
     if (submittedAt <= +lockAt) return event;
+    // A masked run must not count towards a client's progress bar. Retain the
+    // token as a deletion, including when replaying a previously unfrozen log.
+    if (event.type === 'runs') return { ...event, data: null };
     const { x_hydro_rank: _privateRank, ...data } = event.data;
-    return { ...event, data: { ...data, judgement_type_id: null, end_time: null, end_contest_time: null, x_hydro_status: 0 } };
+    return { ...event, data: { ...data, judgement_type_id: null, end_time: null, end_contest_time: null, x_hydro_status: 0,
+        ...(data.x_hydro_journal_status === undefined ? {} : { x_hydro_journal_status: 0 }) } };
 }
 
 /** Mirrors Hydro RULES.acm.stat: seconds (not minute-floor), 20 minutes for
@@ -51,9 +55,9 @@ export function hydroStandings(state: CcsState, groupId?: string) {
             let penalties = 0, judged = 0, pending = 0, acceptedAt: number | null = null;
             for (const submission of submissions.filter(row => row.problem_id === problem.id)) {
                 if (acceptedAt !== null) break;
-                const judgement = judgements.get(submission.id), status = judgement?.x_hydro_status ?? 0;
+                const judgement = judgements.get(submission.id), status = judgement?.x_hydro_journal_status ?? judgement?.x_hydro_status ?? 0;
                 if (!Number.isInteger(submission.x_hydro_order)) orderReliable = false;
-                if (judgement?.judgement_type_id) judged++; else pending++;
+                if (hydroVerdicts[status]) judged++; else pending++;
                 if (![1, 7, 9, 31].includes(status)) penalties++;
                 if (status === 1) {
                     acceptedAt = Math.floor((Date.parse(submission.time) - Date.parse(contest.start_time)) / 1000);

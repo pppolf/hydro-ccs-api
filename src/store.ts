@@ -40,9 +40,11 @@ export class CcsFeedStore {
         return this.remember(scope, result);
     }
 
-    refresh(scope: string, contestId: string, visibility: 'admin' | 'broadcast', source: (previous: CcsState) => Promise<CcsState>) {
+    refresh(scope: string, contestId: string, visibility: 'admin' | 'broadcast', source: (previous: CcsState) => Promise<CcsState>, afterCurrent = false): Promise<Snapshot> {
         const running = this.running.get(scope);
-        if (running) return running;
+        // A notification arriving during a database read needs a trailing read:
+        // the in-flight snapshot may predate the newly completed test case.
+        if (running) return afterCurrent ? running.catch(() => {}).then(() => this.refresh(scope, contestId, visibility, source)) : running;
         const task = this.refreshOnce(scope, contestId, visibility, source).finally(() => { this.running.delete(scope); });
         this.running.set(scope, task);
         return task;

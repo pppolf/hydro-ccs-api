@@ -7,13 +7,14 @@
 ## 支持范围
 
 - Hydro 原生 `acm`（XCPC）比赛，固定开赛和结束时间。
-- 比赛、状态、队伍、分组、学校、题目、语言、提交、判题与榜单资源。
+- 比赛、状态、队伍、分组、学校、题目、语言、提交、判题、逐测试点 `runs` 与榜单资源。
+- 通过测试点总数与完成事件提供直播判题进度；监听 Hydro 评测变化，并保留轮询兜底。
 - NDJSON 持续事件流、历史回放、`since_token` 断线续传。
 - 直播视图遵守封榜；可选的独立只读密钥读取未封榜视图。
 - 主站与域内比赛隔离，全部比赛访问受显式白名单限制。
 - Hydro 秒级罚时、团队成员提交归属、打星分组和气球颜色。
 
-当前不支持 OI/IOI 或个人计时的 `duration` 比赛。不提供写操作、选手代码、测试点、编译日志、题目包、`runs`、`clarifications`、`awards` 或视频流。这是 Contest API 的一个只读子集，完整资源与兼容边界见 [API 文档](docs/API.md)。
+当前不支持 OI/IOI 或个人计时的 `duration` 比赛。不提供写操作、选手代码、测试点输入输出、测试点消息、编译日志、题目包、`clarifications`、`awards` 或视频流。`runs` 仅包含测试点标识、判题结果、运行耗时等元数据。这是 Contest API 的一个只读子集，完整资源与兼容边界见 [API 文档](docs/API.md)。
 
 ## 环境
 
@@ -91,6 +92,8 @@ curl --fail --no-buffer --user ccs "https://hydro.example/api/ccs/contests/69100
 配置中的域名、比赛 ID、密码均为占位示例。实际部署修改私有副本，勿将真实凭据提交到仓库。经 CDS 再连接 Live 时，Live 使用 CDS 的账号和 API；CDS 使用本插件的 Basic 账号。
 
 此接口只传比赛数据，直播画面需另行接入。直播软件可能按分钟重算罚时；精确保留 Hydro 名次时应读取 `/scoreboard` 的 `rank` 和 `x_hydro_total_seconds`，并在赛前验证同罚时、打星和重判场景。
+
+ICPC Live 的逐测试点进度由 `runs` 数量与 `problems.test_data_count` 计算。需要 HydroJudge 在评测过程中上报测试点：`performance` 模式、重判批量上报或题目 `detail: none` 可能使测试点集中到最后才出现，或完全不提供。排查时先确认 Hydro 的评测记录中 `testCases` 会逐步增加；本插件不会根据百分比伪造测试点。很快完成的评测仍可能直接显示最终结果，详见 [部署验收](docs/DEPLOYMENT.md)。
 
 ## 从原监考插件迁移
 

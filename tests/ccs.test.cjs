@@ -3,6 +3,10 @@ const test = require('node:test');
 const http = require('node:http');
 const { Readable } = require('node:stream');
 const { once } = require('node:events');
+const { createRequire } = require('node:module');
+const hydroRequire = createRequire(require.resolve('hydrooj/package.json'));
+const Router = hydroRequire('@koa/router');
+const Koa = hydroRequire('koa');
 
 const { loader } = require('./helpers.cjs');
 const load = loader();
@@ -118,6 +122,21 @@ test('failed writes publish nothing, ambiguous commits retain chunks, and missin
     await assert.rejects(collect(new CcsFeedStore(repository).events('a', null)), /LOG_INCOMPLETE/);
 });
 
+test('a judge notification during an in-flight refresh triggers a trailing snapshot', async () => {
+    const store = new CcsFeedStore(memoryRepository());
+    let release, entered;
+    const gate = new Promise(resolve => { release = resolve; });
+    const reading = new Promise(resolve => { entered = resolve; });
+    const first = store.refresh('progress', tid, 'admin', async () => { entered(); await gate; return state(); });
+    await reading;
+    const next = state([submission('a', 'a', 100)], [judgement('a', 0)]);
+    const notification = store.refresh('progress', tid, 'admin', async () => next, true);
+    release();
+    assert.equal((await first).revision, 1);
+    assert.equal((await notification).revision, 2);
+    assert.ok((await store.read('progress')).state.has('submissions/a'));
+});
+
 test('Basic credentials and explicit contest allowlist reject blank/invalid authorization', () => {
     const basic = `Basic ${Buffer.from('broadcast:secret:with:colons').toString('base64')}`;
     assert.equal(ccsBasicAuthorized(basic, 'broadcast', 'secret:with:colons'), true);
@@ -143,7 +162,21 @@ function fixture() {
     const participants = [{ uid: 1, journal: [{ rid: records[0]._id, status: 1 }] },
         { uid: 2, members: [3, 5], journal: [{ rid: records[1]._id, status: 1 }] },
         { uid: 4, unrank: true, journal: [] }, { uid: 5, journal: [] }];
-    const query = rows => ({ project(projection) { calls.push(['project', projection]); return query(rows.map(row => Object.fromEntries(Object.keys(projection).map(key => [key, row[key]])))); },
+    const query = rows => ({ project(projection) {
+        calls.push(['project', projection]);
+        return query(rows.map(row => {
+            const result = {};
+            for (const key of Object.keys(projection)) {
+                const [root, field] = key.split('.');
+                if (field) {
+                    if (!Array.isArray(row[root])) continue;
+                    result[root] ||= row[root].map(() => ({}));
+                    row[root].forEach((value, i) => { result[root][i][field] = value[field]; });
+                } else result[key] = row[key];
+            }
+            return result;
+        }));
+    },
         sort() { return this; }, toArray: async () => rows.map(row => ({ ...row })) });
     const collections = new Map();
     const collection = name => {
@@ -166,6 +199,7 @@ function fixture() {
         args = {}; request = { method: 'get', headers: {} };
         response = { status: 200, headers: {}, addHeader(name, value) { this.headers[name] = value; } };
     }
+    const problems = { 1: { docId: 1, title: 'A + B', config: { count: 4 } } };
     const hydro = { Handler, Context: class {}, ConnectionHandler: class {}, ObjectId, ValidationError: Error,
         BadRequestError: Error, ForbiddenError: Error, CreateError: () => Error, param: () => () => {}, PERM: {}, PRIV: {}, Types: { ObjectId: {} },
         SystemModel: { get: key => settings[key.replace('hydroCcsApi.', '')] },
@@ -174,14 +208,26 @@ function fixture() {
         ContestModel: { get: async (domain, id) => { calls.push(['contest', domain, String(id)]); return contest; },
             getMulti: () => query([contest]), getMultiStatus: () => query(participants) },
         RecordModel: { getMulti: (domain, filter) => { calls.push(['records', domain, filter]); return query(records); } },
-        ProblemModel: { getMulti: () => query([{ docId: 1, title: 'A + B' }]) },
+        ProblemModel: { getList: async () => structuredClone(problems) },
         UserModel: { getList: async () => ({ 1: { _id: 1, uname: 'team01', school: 'University', password: 'PRIVATE_PASSWORD' },
             2: { _id: 2, uname: 'Team02', displayName: 'Team 2' }, 3: { _id: 3, uname: 'member03' },
             4: { _id: 4, uname: 'star' }, 5: { _id: 0, uname: 'Unknown User' } }) },
     };
-    const load = loader(hydro), routes = new Map(), hooks = {}, disposers = [];
+    const load = loader(hydro), routes = new Map(), hooks = {}, disposers = [], router = new Router();
+    router.use(async (c, next) => { c.set('X-Test-Middleware', 'preserved'); await next(); });
+    router.all('api', '/api/:op', c => { c.status = 400; c.body = { error: 'generic API', op: c.params.op }; });
     const ctx = { i18n: { load() {} }, effect: callback => { const dispose = callback(); if (typeof dispose === 'function') disposers.push(dispose); }, on: (event, callback) => { hooks[event] = callback; }, interval: () => {},
-        Route: (_name, url, handler) => routes.set(url, handler) };
+        server: { router },
+        Route: (name, url, handler) => {
+            routes.set(url, handler);
+            router.all(name, url, async c => {
+                const h = new handler(); h.args = c.query; h.request.headers = c.headers;
+                await h.get({ domainId: 'acm', ...c.params });
+                c.status = h.response.status; c.type = h.response.type; c.set(h.response.headers); c.body = h.response.body;
+            });
+            const layer = router.stack.at(-1);
+            disposers.push(() => { const i = router.stack.indexOf(layer); if (i >= 0) router.stack.splice(i, 1); });
+        } };
     load('settings').registerCcsSettings(ctx);
     const isCcs = load('api').registerCcsApi(ctx);
     const headers = { authorization: `Basic ${Buffer.from('broadcast:secret').toString('base64')}` };
@@ -190,9 +236,30 @@ function fixture() {
         const h = new Handler(); h.args = args; h.request.headers = admin ? { 'x-ccs-api-key': 'a'.repeat(64) } : headers;
         await h.get({ domainId: 'acm', contestId: tid, endpoint }); return h;
     }
-    return { contest, records, participants, calls, settings, headers, get, load, routes, hooks, isCcs, hydro, ctx,
+    return { contest, records, participants, problems, calls, settings, headers, get, load, routes, hooks, isCcs, hydro, ctx,
         dispose: () => { for (const dispose of disposers.reverse()) dispose(); } };
 }
+
+test('CCS root takes precedence over Hydro generic API without bypassing middleware, auth or disposal', async t => {
+    const f = fixture(), app = new Koa();
+    app.use(f.ctx.server.router.routes());
+    const server = app.listen(0, '127.0.0.1');
+    t.after(async () => { f.dispose(); server.close(); await once(server, 'close'); });
+    await once(server, 'listening');
+    const base = `http://127.0.0.1:${server.address().port}`;
+    for (const route of ['/api/ccs', '/api/ccs/']) {
+        const response = await fetch(base + route, { headers: f.headers });
+        assert.equal(response.status, 200);
+        assert.equal(response.headers.get('x-test-middleware'), 'preserved');
+        assert.equal((await response.json()).provider.name, 'hydro-ccs-api');
+    }
+    const denied = await fetch(base + '/api/ccs');
+    assert.equal(denied.status, 401);
+    assert.match(denied.headers.get('www-authenticate'), /^Basic /);
+    assert.equal((await fetch(base + '/api/unrelated').then(r => r.json())).op, 'unrelated');
+    f.dispose();
+    assert.equal((await fetch(base + '/api/ccs').then(r => r.json())).error, 'generic API');
+});
 
 test('native source exports projected metadata and member ownership; broadcast masks late submissions but keeps prefreeze judgements', async () => {
     const f = fixture(), { readHydroCcsState } = f.load('source');
@@ -226,7 +293,7 @@ test('JSON resources and NDJSON history both honor freeze, including re-locking;
     assert.deepEqual((await f.get('scoreboard', false, { group_id: 'observers' })).response.body.rows.map(row => [row.team_id, row.rank]), [['star', 1]]);
     const access = (await f.get('access')).response.body;
     assert.ok(access.endpoints.every(row => row.properties.length));
-    assert.equal(access.endpoints.some(row => row.type === 'runs'), false);
+    assert.equal(access.endpoints.some(row => row.type === 'runs'), true);
     const dump = async admin => collect((await f.get('event-feed', admin, { stream: 'false' })).response.body);
     const a = (await dump(true)).map(line => JSON.parse(line));
     let b = (await dump(false)).map(line => JSON.parse(line));
@@ -366,7 +433,7 @@ test('standalone entrypoint registers only CCS routes without contest writes or 
     const Info = f.routes.get('/api/ccs'), info = new Info();
     info.request.headers = f.headers;
     await info.get({ domainId: 'acm' });
-    assert.deepEqual(info.response.body.provider, { name: 'hydro-ccs-api', version: '1.0.0' });
+    assert.deepEqual(info.response.body.provider, { name: 'hydro-ccs-api', version: '1.1.0' });
 });
 
 test('independent API key is disabled by default, bounded, constant-time compared and never falls back to Basic', async () => {
@@ -429,4 +496,190 @@ test('plugin disposal cancels active event feeds and refuses refreshes', async t
     await closed;
     assert.equal(body.destroyed, true);
     assert.equal((await f.get('scoreboard')).response.status, 503);
+});
+
+const testCase = (id, subtaskId = 1, status = 1) => ({ id, subtaskId, status, time: 123,
+    message: 'PRIVATE_TEST_MESSAGE', input: 'PRIVATE_INPUT', output: 'PRIVATE_OUTPUT', memory: 999 });
+const readFeed = async (f, admin = false, since_token) =>
+    (await collect((await f.get('event-feed', admin, { stream: 'false', since_token })).response.body)).map(JSON.parse);
+const recordNotification = f => ({ ...f.records[0], domainId: 'acm', contest: f.contest.docId });
+
+test('real test-case runs have stable ordinals, safe projections and resumable timestamps', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
+    const f = fixture();
+    f.records[0].status = 20;
+    f.records[0].judgeAt = null;
+    f.participants[0].journal[0].status = 0;
+    f.records[0].testCases = [testCase(3), testCase(3)];
+    const first = await readFeed(f);
+    const run = first.find(event => event.type === 'runs').data;
+    assert.equal(run.judgement_id, `hydro-${oid(100)}`);
+    assert.equal(run.ordinal, 1);
+    assert.equal(run.run_time, 0.123);
+    assert.equal(run.x_hydro_time_source, 'CCS_OBSERVED');
+    assert.equal(first.find(event => event.type === 'problems').data.test_data_count, 4);
+    assert.equal(first.filter(event => event.type === 'runs').length, 1, 'duplicate case callbacks do not advance progress twice');
+    assert.doesNotMatch(JSON.stringify(first), /PRIVATE_|"memory"|"message"|"input"|"output"/);
+    const projected = f.calls.find(call => call[0] === 'project' && call[1]['testCases.id'])[1];
+    assert.equal(projected['testCases.time'], 1);
+    assert.equal(projected.testCases, undefined, 'test messages and other private fields are not fetched');
+    t.mock.timers.tick(1000);
+    assert.deepEqual(await readFeed(f, false, first.at(-1).token), [], 'unchanged reads retain per-case observation times');
+    f.records[0].testCases.push(testCase(1), testCase(1, 2));
+    const updates = await readFeed(f, false, first.at(-1).token);
+    const runs = (await f.get('runs')).response.body;
+    assert.deepEqual(runs.map(row => row.ordinal), [1, 2, 3]);
+    assert.equal(updates.filter(event => event.type === 'runs').length, 2);
+    assert.equal(runs[0].time, run.time);
+    const Handler = f.routes.get('/api/ccs/contests/:contestId/:endpoint/:id'), single = new Handler();
+    single.request.headers = f.headers;
+    await single.get({ domainId: 'acm', contestId: tid, endpoint: 'runs', id: run.id });
+    assert.deepEqual(single.response.body, run);
+    // Recreate the API/store over the same repository to exercise durable state.
+    f.dispose();
+    f.load('api').registerCcsApi(f.ctx);
+    f.records[0].testCases.reverse();
+    assert.deepEqual(await readFeed(f, false, updates.at(-1).token), []);
+    assert.deepEqual((await f.get('runs')).response.body.map(row => [row.id, row.ordinal]).sort(), runs.map(row => [row.id, row.ordinal]).sort());
+    assert.deepEqual((await readFeed(f)).slice(first.length), updates);
+    f.records[0].testCases.push(testCase(3, 1, 2));
+    const corrected = await readFeed(f, false, updates.at(-1).token);
+    assert.equal(corrected.length, 1);
+    assert.equal(corrected[0].id, run.id);
+    assert.equal(corrected[0].data.judgement_type_id, 'WA');
+    assert.equal((await f.get('runs')).response.body.length, 3);
+    f.dispose();
+});
+
+test('live feed wakes for each observed test case and reports the final verdict after the journal settles', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(1000) });
+    const f = fixture();
+    Object.assign(f.records[0], { status: 0, judgeAt: null, testCases: [] });
+    f.participants[0].journal[0].status = 0;
+    const baseline = await readFeed(f);
+    const body = (await f.get('event-feed', false, { since_token: baseline.at(-1).token })).response.body;
+    const iterator = body[Symbol.asyncIterator]();
+    t.after(() => { body.destroy(); f.dispose(); });
+    const events = [];
+    async function until(predicate) {
+        let timeout;
+        try {
+            return await Promise.race([
+                (async () => {
+                    for (;;) {
+                        const item = await iterator.next();
+                        assert.equal(item.done, false);
+                        if (!item.value.trim()) continue;
+                        const event = JSON.parse(item.value); events.push(event);
+                        if (predicate(event)) return event;
+                    }
+                })(),
+                new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('feed waited for the 2-second poll')), 1000); }),
+            ]);
+        } finally { clearTimeout(timeout); }
+    }
+    assert.equal((await iterator.next()).value, '\n');
+    f.records[0].status = 21;
+    await f.hooks['record/change'](recordNotification(f));
+    assert.equal((await until(event => event.type === 'judgements')).data.x_hydro_status, 21);
+    const liveRuns = new Map();
+    for (const id of [1, 2, 3, 4]) {
+        f.records[0].status = 20;
+        f.records[0].testCases.push(testCase(id));
+        await f.hooks['record/change'](recordNotification(f));
+        const event = await until(event => event.type === 'runs');
+        liveRuns.set(event.id, event.data);
+        assert.equal(liveRuns.size / 4, id / 4, 'same progress calculation as the ICPC Live CLICS parser');
+    }
+    f.records[0].status = 1;
+    f.records[0].judgeAt = at(1001);
+    await f.hooks['record/change'](recordNotification(f));
+    assert.ok(events.filter(event => event.type === 'judgements').every(event => event.data.judgement_type_id === null));
+    f.participants[0].journal[0].status = 1;
+    await f.hooks['record/judge'](recordNotification(f));
+    const final = await until(event => event.type === 'judgements' && event.data.judgement_type_id === 'AC');
+    assert.equal(final.data.end_time, at(1001).toISOString());
+    assert.deepEqual(await readFeed(f, false, final.token), []);
+});
+
+test('freeze hides runs in current resources and history, and thaw restores them', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
+    const f = fixture();
+    f.records[0].testCases = [testCase(1)];
+    f.records[1].testCases = [testCase(1), testCase(2)];
+    const lateJudgement = `hydro-${oid(1900)}`;
+    assert.equal((await f.get('runs')).response.body.length, 1);
+    assert.equal((await f.get('runs', true)).response.body.length, 3);
+    f.contest.unlocked = true;
+    const thawed = await readFeed(f);
+    const lateRuns = thawed.filter(event => event.type === 'runs' && event.data?.judgement_id === lateJudgement);
+    assert.equal(lateRuns.length, 2);
+    f.contest.unlocked = false;
+    const frozen = await readFeed(f);
+    for (const run of lateRuns) assert.ok(frozen.filter(event => event.id === run.id).every(event => event.data === null));
+    const resumed = await readFeed(f, false, thawed.at(-1).token);
+    assert.equal(resumed.filter(event => event.type === 'runs' && event.data === null).length, 2);
+    f.contest.lockAt = at(100);
+    assert.equal((await f.get('runs')).response.body.length, 1, 'submission at lockAt remains visible');
+    f.contest.lockAt = at(99);
+    assert.deepEqual((await f.get('runs')).response.body, []);
+    assert.ok((await readFeed(f)).filter(event => event.type === 'runs').every(event => event.data === null));
+    f.contest.unlocked = true;
+    assert.equal((await f.get('runs')).response.body.length, 3);
+    f.dispose();
+});
+
+test('rejudging deletes old runs, resets live progress, and retains native journal scoring until updated', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
+    const f = fixture();
+    f.records[0].testCases = [testCase(2), testCase(1)];
+    const first = await readFeed(f);
+    const oldRuns = first.filter(event => event.type === 'runs');
+    Object.assign(f.records[0], { status: 0, judgeAt: null, testCases: [] });
+    await f.hooks['record/change'](recordNotification(f));
+    const reset = await readFeed(f, false, first.at(-1).token);
+    assert.deepEqual(reset.filter(event => event.type === 'runs').map(event => [event.id, event.data]), oldRuns.map(event => [event.id, null]));
+    assert.equal(reset.find(event => event.type === 'judgements').data.judgement_type_id, null);
+    assert.equal((await f.get('scoreboard')).response.body.rows.find(row => row.team_id === 'team01').score.num_solved, 1);
+    t.mock.timers.tick(1000);
+    f.records[0].status = 20;
+    f.records[0].testCases = [testCase(1)];
+    await f.hooks['record/change'](recordNotification(f));
+    const progress = (await f.get('runs')).response.body;
+    assert.equal(progress.length, 1);
+    assert.equal(progress[0].ordinal, 2, 'ordinal survives a different completion order on rejudge');
+    assert.notEqual(progress[0].time, oldRuns.find(event => event.id === progress[0].id).data.time);
+    Object.assign(f.records[0], { status: 2, judgeAt: at(2002) });
+    const pending = (await f.get('judgements')).response.body.find(row => row.id === `hydro-${oid(100)}`);
+    assert.equal(pending.judgement_type_id, null, 'an old journal AC must not finish an ongoing rejudge');
+    f.participants[0].journal[0].status = 2;
+    await f.hooks['record/judge'](recordNotification(f));
+    assert.equal((await f.get('judgements')).response.body.find(row => row.id === pending.id).judgement_type_id, 'WA');
+    assert.equal((await f.get('scoreboard')).response.body.rows.find(row => row.team_id === 'team01').score.num_solved, 0);
+    f.dispose();
+});
+
+test('unknown test counts, unavailable cases and invalid case reports never fabricate progress', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
+    const f = fixture();
+    f.records[0].testCases = [testCase(1)];
+    for (const config of ['Cannot parse: invalid config', { count: 0 }, { count: -1 }, { count: 1.5 }, {}]) {
+        f.problems[1].config = config;
+        assert.deepEqual((await f.get('runs')).response.body, []);
+        assert.equal((await f.get('problems')).response.body[0].test_data_count, undefined);
+    }
+    f.problems[1].config = { count: 4 };
+    f.records[0].testCases = [testCase(0), testCase(-1), testCase(1, -1), testCase(1, 1, 20),
+        { ...testCase(2), time: NaN }, { ...testCase(2), time: -1 }];
+    assert.deepEqual((await f.get('runs')).response.body, []);
+    f.records[0].testCases = [];
+    f.records[0].progress = 75;
+    assert.deepEqual((await f.get('runs')).response.body, [], 'a percentage alone cannot invent individual test verdicts');
+    const before = f.calls.length;
+    await f.hooks['record/change']({ ...recordNotification(f), domainId: 'another' });
+    assert.equal(f.calls.length, before);
+    f.settings.contests = '';
+    await f.hooks['record/change'](recordNotification(f));
+    assert.equal(f.calls.length, before);
+    f.dispose();
 });
