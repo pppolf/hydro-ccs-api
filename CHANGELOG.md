@@ -5,6 +5,9 @@
 - Add optional school-name-to-organization-ID mappings in Hydro system settings for preparing broadcast packages (for example, `西华师范大学` → `cwnu`).
 - Keep organization resources, team references and both event-feed views consistent; preserve fallback IDs, historical events and existing resume tokens.
 - Validate mapping syntax, IDs and collisions, with regressions for configuration changes and replay.
+- Add optional custom groups selected by school name and team-account lists, with contest scoping and resumable membership updates.
+- Preserve the built-in participants/observers groups and keep starred teams out of custom-group official scoreboards.
+- Include a five-group school/cohort example and document the distinction between CCS groups, organization IDs and broadcast display settings.
 
 ## 1.1.0 — 2026-11-16
 

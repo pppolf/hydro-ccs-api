@@ -68,7 +68,7 @@ export function hydroStandings(state: CcsState, groupId?: string) {
                 ...(acceptedAt === null ? {} : { time: Math.floor(acceptedAt / 60), x_hydro_time_seconds: acceptedAt }) };
         });
         return { team_id: team.id, rank: 0, score: { num_solved: solved, total_time: Math.floor(seconds / 60) },
-            x_hydro_total_seconds: seconds, x_order_reliable: orderReliable, x_unranked: team.hidden === true || (!groupId && Boolean(team.group_ids?.includes('observers'))),
+            x_hydro_total_seconds: seconds, x_order_reliable: orderReliable, x_unranked: team.hidden === true || (groupId !== 'observers' && Boolean(team.group_ids?.includes('observers'))),
             name: team.name, problems: scores };
     });
     rows.sort((a, b) => b.score.num_solved - a.score.num_solved || a.x_hydro_total_seconds - b.x_hydro_total_seconds || String(a.name).localeCompare(String(b.name), 'en-US'));

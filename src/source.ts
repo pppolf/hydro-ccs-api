@@ -3,6 +3,7 @@ import { digest, duration, entityKey, hydroVerdicts, judgementTypes, type CcsObj
 import { addCcsRuns } from './runs';
 import { ccsOrganizationIds } from './organizations';
 import { ccsSetting } from './settings';
+import { ccsGroups, ccsTeamGroupIds, type CcsGroupRule } from './groups';
 
 export class CcsError extends Error {
     constructor(public status: number, message: string) { super(message); }
@@ -36,6 +37,9 @@ export async function readHydroCcsState(domainId: string, tid: ObjectId, visibil
     let organizationIds: Map<string, string>;
     try { organizationIds = ccsOrganizationIds(ccsSetting('organizationIds')); }
     catch { throw new CcsError(503, 'CCS organization ID mapping is invalid'); }
+    let groups: CcsGroupRule[];
+    try { groups = ccsGroups(ccsSetting('groups')).filter(group => !group.contests || group.contests.includes(`${domainId}/${tid}`)); }
+    catch { throw new CcsError(503, 'CCS custom group configuration is invalid'); }
     const [participants, records, problems] = await Promise.all([
         ContestModel.getMultiStatus(domainId, { docId: tid }).project({ uid: 1, attend: 1, unrank: 1, members: 1, journal: 1 }).toArray(),
         RecordModel.getMulti(domainId, { contest: tid }).project({ _id: 1, uid: 1, pid: 1, lang: 1, status: 1, judgeAt: 1,
@@ -60,6 +64,7 @@ export async function readHydroCcsState(domainId: string, tid: ObjectId, visibil
     }
     add('groups', { id: 'participants', name: '正式队伍', hidden: false });
     add('groups', { id: 'observers', name: '打星队伍', hidden: false });
+    for (const group of groups) add('groups', { id: group.id, name: group.name, hidden: false });
     const maintainers = new Set(contest.maintainer || []);
     const teamIds = new Map<number, string>();
     const owner = new Map<number, number>(), journal = new Map<string, { uid: number; order: number; status: number }>();
@@ -80,7 +85,7 @@ export async function readHydroCcsState(domainId: string, tid: ObjectId, visibil
             add('organizations', { id: organizationId, name: school, formal_name: school });
         }
         add('teams', { id: user.uname, label: String(user.seat || uid), name: user.displayName || user.uname,
-            organization_id: organizationId, group_ids: [participant.unrank ? 'observers' : 'participants'], hidden: maintainers.has(uid),
+            organization_id: organizationId, group_ids: [participant.unrank ? 'observers' : 'participants', ...ccsTeamGroupIds(groups, school, user.uname)], hidden: maintainers.has(uid),
             x_hydro_username: user.uname,
             x_hydro_usernames: [...new Set([uid, ...(participant.members || [])].filter(id => users[id]?._id === id).map(id => users[id].uname))] });
     }

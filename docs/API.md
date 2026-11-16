@@ -29,7 +29,7 @@ API 基址为 `/api/ccs`，域内为 `/d/<domain>/api/ccs`。所有资源均为 
 | `/contests/:id/state` | 开始、结束、封榜、解封状态 |
 | `/contests/:id/access` | 本实现支持的实体字段；写入能力列表为空 |
 | `/contests/:id/teams` | 队伍、所属组织、组别及隐藏标记 |
-| `/contests/:id/groups` | `participants` 正式队、`observers` 打星队 |
+| `/contests/:id/groups` | `participants` 正式队、`observers` 打星队及配置的学校/年级等自定义分组 |
 | `/contests/:id/organizations` | 学校/组织 |
 | `/contests/:id/problems` | 题号、顺序、标题、气球 `color`/`rgb`、可确定时的测试点总数 `test_data_count` |
 | `/contests/:id/languages` | 语言 |
@@ -84,6 +84,26 @@ HydroJudge 的 `performance` 模式会缓存测试点直到结束；部分版本
 历史事件回放同样按当前封榜策略过滤；提前封榜时间或重新封榜不会通过旧事件泄漏隐藏结果。封榜后的提交不输出 runs；历史中的对应 run 事件保留 token，但转为 `data: null`，避免结果或测试点完成数量进入直播进度。解封后消费者会得到可见结果与 runs 更新。
 
 CCS 队伍 ID 使用 Hydro 队伍账号用户名，`team_id` 引用相同值；团队成员的提交根据原生 journal 和成员关系归属。比赛管理员账号标记 `hidden: true` 并排除出榜单。打星队保留展示，默认正式排名排除打星队；指定 `group_id=observers` 可取打星独立榜。
+
+## 自定义分组
+
+`hydroCcsApi.groups` 接受 JSON 文本数组，每项定义一个附加分组。默认空配置，保留原 `participants` / `observers` 的 ID 和含义。配置示例见 [groups.example.json](../examples/groups.example.json)。
+
+| 字段 | 含义 |
+| --- | --- |
+| `id` | 必填，匹配 `[a-zA-Z0-9_-]{1,64}`，区分大小写，全配置唯一；不能使用 `participants` 或 `observers` |
+| `name` | 必填，去除首尾空白后为 1–128 字符的显示名称 |
+| `schools` | 可选的学校名称字符串数组，与队伍账号去除首尾空白后的 `school` 精确匹配 |
+| `teams` | 可选的队伍账号用户名字符串数组，与 `teams[].id` 精确匹配，区分大小写；不依据团队成员账号归组 |
+| `contests` | 可选的非空 `域ID/24位比赛ID` 字符串数组；省略时适用于所有域和比赛 |
+
+每项必须至少填写 `schools` / `teams` 之一；同时填写时按交集匹配。选择条件省略表示不限制，显式 `[]` 表示没有队伍匹配；不同分组可重叠，同一队伍可属于多个组。名单值去除首尾空白并去重。空配置或 `[]` 清除所有自定义分组；非法配置保存时拒绝，绕过设置页写入时返回 503，不发布不完整状态。
+
+当前比赛范围内配置的分组即使没有队伍也会输出，形如 `{"id":"besti_fresh","name":"北京电子科技学院新生","hidden":false}`；不输出匹配规则或其他比赛的名单。队伍 `group_ids` 的第一项仍由 `unrank` 决定为 `participants` / `observers`，后面按配置顺序追加匹配的分组 ID。学校分组与 `organization_id` 独立，组织 ID 映射不会改变分组匹配。
+
+两种鉴权视图使用同一分组规则，保持各自的封榜策略。`/groups`、单分组对象、`/teams` 和 event-feed 使用相同对象和 ID；先发布新增分组，再发布引用它的队伍。修改名称、名单或清除配置会追加变更/删除事件，历史事件和既有 token 不变。`/scoreboard?group_id=<id>` 返回该分组内的正式排名，继续排除打星及隐藏队伍；只有 `group_id=observers` 单独计算打星榜。未知分组返回 400。
+
+“全部队伍”是展示端取消分组筛选的行为，不额外生成 `all` 组。直播端的 `isHidden` / `isOutOfContest` 是消费端配置，不是本接口分组对象的标准字段；原正式/打星配置保持不变，新增学校/年级组可设为可见且不额外标记为场外。
 
 ## 组织 ID 映射
 

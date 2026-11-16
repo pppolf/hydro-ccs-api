@@ -45,6 +45,7 @@ hydrooj addon add /opt/hydro-ccs-api
 | CCS 直播密码 | 空 | 直播独立密码；首次未设置时拒绝 Basic 访问 |
 | CCS 允许读取的比赛 | 空 | `域ID/24位比赛ID`，逗号或空白分隔，最多 100 项 |
 | CCS 组织 ID 映射 | 空 | 学校名称到固定组织 ID 的 JSON 对象，便于提前准备直播 package |
+| CCS 自定义分组 | 空 | 按学校名称、队伍账号名单分组的 JSON 数组，可限定比赛；正式/打星分组自动保留 |
 | CCS 未封榜读取密钥 | 空 | 可选 `x-ccs-api-key`；32–1024 个可见 ASCII 字符，不含空白，只读未封榜结果 |
 
 例如：
@@ -78,6 +79,30 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 映射适用于所有域和比赛，按 Hydro 队伍账号的学校名称匹配；配置名称与学校名称均去除首尾空白，其余字符须一致。ID 区分大小写，须为 1–64 个英文字母、数字、下划线或连字符，不同学校不能配置相同 ID。未映射学校继续使用原哈希 ID；没有学校的队伍保持 `organization_id: null`。留空或填写 `{}` 可清除映射。
 
 建议在准备 package、首次连接直播前完成配置。保存后在下一次数据刷新时生效；若已有事件历史，会追加旧组织删除、新组织及队伍更新事件，原 token 仍可续传。**历史事件不会改写**，因此从头读取 event-feed 仍可能先看到旧哈希 ID，再收到映射后的变更；查看当前 ID 可使用 `/organizations` 和 `/teams`。
+
+### 学校与年级分组
+
+在 **CCS 自定义分组**（`hydroCcsApi.groups`）中填写 JSON 数组。可直接复制 [五个分组的配置示例](examples/groups.example.json)，其中北电老生/新生的 `teams` 数组需要填入各自的队伍账号；空数组表示暂不归入任何队伍。
+
+```json
+[
+  { "id": "besti_senior", "name": "北京电子科技学院老生", "teams": ["besti_old_01", "besti_old_02"] },
+  { "id": "besti_fresh", "name": "北京电子科技学院新生", "teams": ["besti_new_01"] },
+  { "id": "cwnu", "name": "西华师范大学", "schools": ["西华师范大学"] },
+  { "id": "xju", "name": "新疆大学", "schools": ["新疆大学"] },
+  { "id": "scun", "name": "中南民族大学", "schools": ["中南民族大学"] }
+]
+```
+
+示例中的 `besti_old_01` 等账号是占位示例，须换成实际 **Hydro 队伍账号用户名**（也就是 `/teams` 中的 `id`），不填队伍显示名、成员账号或组织 ID。`schools` 按队伍账号的学校名称自动匹配。若同一项同时填写 `schools` 和 `teams`，须同时满足两个条件；一支队伍可匹配多个自定义分组。名单不应将同一账号同时放入老生和新生组。
+
+可为某个分组添加 `"contests": ["system/691000000000000000000001"]`，限定生效的域和比赛；省略则适用于所有比赛。多场比赛复用账号时，建议为年级名单限定比赛，避免旧名单影响后续比赛。
+
+`participants`（正式队伍）与 `observers`（打星队伍）自动保留，不能在自定义配置中覆盖。学校与年级是附加分组，例如正式新生队的 `group_ids` 为 `["participants", "besti_fresh"]`，西华师大的打星队为 `["observers", "cwnu"]`。组织 ID `CWNU` 和分组 ID `cwnu` 各自独立，不必相同。“全部队伍”由展示端不限制分组实现，无需添加一个 `all` 组。
+
+直播端若另有 `isHidden` / `isOutOfContest` 配置，原 `participants` 保持 `false/false`，`observers` 保持 `false/true`；新增学校、年级分组使用相同 ID，设为 `false/false`。event-feed 的标准分组对象输出 `id`、`name`、`hidden`，所属关系在队伍的 `group_ids` 中。
+
+保存后，`/groups`、`/teams` 和 event-feed 一起更新；可用 `/scoreboard?group_id=cwnu` 读取该组的正式榜单。默认榜和自定义分组榜继续排除打星队及隐藏队伍，`group_id=observers` 保留打星独立榜。历史事件及 token 保留；调整名单或删除分组会追加变更事件。只有配置过的分组会导出，未配置时仍只有原来的两个分组。展示端是否显示分组按钮取决于其对 `groups` 的支持及本身配置。
 
 ## 接口地址
 

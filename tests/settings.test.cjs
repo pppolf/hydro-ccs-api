@@ -30,7 +30,7 @@ test('real Hydro registry receives independent settings, secret fields and dispo
     const f = settingsContext();
     try {
         const rows = nativeSettings.SYSTEM_SETTINGS.filter(row => row.key.startsWith('hydroCcsApi.'));
-        assert.deepEqual(rows.map(row => row.key).sort(), ['adminApiKey', 'contests', 'organizationIds', 'password', 'username'].map(key => `hydroCcsApi.${key}`));
+        assert.deepEqual(rows.map(row => row.key).sort(), ['adminApiKey', 'contests', 'groups', 'organizationIds', 'password', 'username'].map(key => `hydroCcsApi.${key}`));
         assert.ok(rows.every(row => row.family === 'setting_hydro_ccs_api'));
         assert.equal(f.locales.zh.setting_hydro_ccs_api, 'CCS 比赛数据接口');
         for (const key of ['password', 'adminApiKey']) {
@@ -42,6 +42,8 @@ test('real Hydro registry receives independent settings, secret fields and dispo
         assert.equal(nativeSettings.SYSTEM_SETTINGS_BY_KEY['hydroCcsApi.contests'].value, '');
         assert.equal(nativeSettings.SYSTEM_SETTINGS_BY_KEY['hydroCcsApi.organizationIds'].value, '');
         assert.equal(nativeSettings.SYSTEM_SETTINGS_BY_KEY['hydroCcsApi.organizationIds'].type, 'textarea');
+        assert.equal(nativeSettings.SYSTEM_SETTINGS_BY_KEY['hydroCcsApi.groups'].value, '');
+        assert.equal(nativeSettings.SYSTEM_SETTINGS_BY_KEY['hydroCcsApi.groups'].type, 'textarea');
     } finally { f.dispose(); }
     assert.deepEqual(new Set(nativeSettings.SYSTEM_SETTINGS.map(row => row.key)), existing);
 });
@@ -82,5 +84,34 @@ test('native save hook validates flat and nested settings before any writes', ()
         assert.doesNotThrow(() => save({ hydroCcsApi: { username: 'ccs', password: '', adminApiKey: '', contests: '' } }));
         assert.doesNotThrow(() => save({ 'hydroCcsApi.adminApiKey': 'a'.repeat(64), 'hydroCcsApi.contests': 'system/691000000000000000000001' }));
         assert.doesNotThrow(() => f.hooks['handler/before/SystemSetting']({ request: { method: 'GET' }, args: { hydroCcsApi: { username: '' } } }));
+    } finally { f.dispose(); }
+});
+
+test('custom group settings validate selectors, reserved IDs and contest scopes before saving', () => {
+    const f = settingsContext();
+    const save = args => f.hooks['handler/before/SystemSetting']({ request: { method: 'POST' }, args });
+    const group = { id: 'besti_fresh', name: '北京电子科技学院新生', teams: ['Team02'] };
+    try {
+        for (const value of ['', ' \n ', '[]', JSON.stringify([group]), JSON.stringify([
+            { ...group, schools: [' 北京电子科技学院 '], contests: ['acm/6AC20790D61D6F63E08474E4'] },
+            { id: 'cwnu', name: '西华师范大学', schools: ['西华师范大学'] },
+            { id: 'empty', name: '待分配队伍', teams: [] },
+        ])]) {
+            assert.doesNotThrow(() => save({ 'hydroCcsApi.groups': value }));
+            assert.doesNotThrow(() => save({ hydroCcsApi: { groups: value } }));
+        }
+        const invalidGroups = [null, [], {}, { id: 'missing', name: 'Missing selectors' },
+            ...['participants', 'observers', '', 'a/b', 'a.b', 'a'.repeat(65), 123].map(id => ({ ...group, id })),
+            ...['', ' ', 123, 'a'.repeat(129)].map(name => ({ ...group, name })),
+            { ...group, school: '北京电子科技学院' },
+            ...['teams', 'schools', 'contests'].flatMap(key => [null, 'text', {}, [''], [' '], [123]].map(value => ({ ...group, [key]: value }))),
+            { ...group, contests: [] }, { ...group, contests: ['*/691000000000000000000001'] },
+            { ...group, contests: ['system/not-a-contest'] },
+        ];
+        for (const value of ['{', '{}', 'null', 'true', '42', [group], JSON.stringify([group, group]),
+            ...invalidGroups.map(row => JSON.stringify([row]))]) {
+            assert.throws(() => save({ 'hydroCcsApi.groups': value }), ValidationError);
+            assert.throws(() => save({ hydroCcsApi: { groups: value } }), ValidationError);
+        }
     } finally { f.dispose(); }
 });

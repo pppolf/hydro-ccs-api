@@ -1,0 +1,27 @@
+[
+  {
+    "id": "besti_senior",
+    "name": "北京电子科技学院老生",
+    "teams": []
+  },
+  {
+    "id": "besti_fresh",
+    "name": "北京电子科技学院新生",
+    "teams": []
+  },
+  {
+    "id": "cwnu",
+    "name": "西华师范大学",
+    "schools": ["西华师范大学"]
+  },
+  {
+    "id": "xju",
+    "name": "新疆大学",
+    "schools": ["新疆大学"]
+  },
+  {
+    "id": "scun",
+    "name": "中南民族大学",
+    "schools": ["中南民族大学"]
+  }
+]

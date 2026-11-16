@@ -362,6 +362,123 @@ test('invalid organization settings or collisions with fallback IDs publish no p
     assert.deepEqual(await collect(resumed.body), []);
 });
 
+test('school and account groups populate resources and both feeds while preserving organization and participation IDs', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
+    const f = fixture();
+    t.after(f.dispose);
+    f.users[1].school = '北京电子科技学院';
+    f.users[2].school = '北京电子科技学院';
+    f.users[4].school = ' 西华师范大学 ';
+    f.settings.organizationIds = '{"西华师范大学":"CWNU","北京电子科技学院":"BESTI"}';
+    const groups = [
+        { id: 'besti_senior', name: '北京电子科技学院老生', schools: ['北京电子科技学院'], teams: ['team01', 'member03'] },
+        { id: 'besti_fresh', name: '北京电子科技学院新生', schools: ['北京电子科技学院'], teams: ['Team02', 'star', 'Unknown User'] },
+        { id: 'cwnu', name: '西华师范大学', schools: [' 西华师范大学 '] },
+        { id: 'xju', name: '新疆大学', schools: ['新疆大学'] },
+        { id: 'scun', name: '中南民族大学', schools: ['中南民族大学'] },
+    ];
+    f.settings.groups = JSON.stringify([
+        ...groups.map(group => ({ ...group, contests: [`acm/${tid}`] })),
+        { id: 'another_domain', name: 'Other domain', teams: ['team01'], contests: [`system/${tid}`] },
+        { id: 'another_contest', name: 'Other contest', teams: ['team01'], contests: ['acm/691000000000000000000002'] },
+    ]);
+    const expectedGroups = [{ id: 'participants', name: '正式队伍', hidden: false }, { id: 'observers', name: '打星队伍', hidden: false },
+        ...groups.map(({ id, name }) => ({ id, name, hidden: false }))];
+    for (const admin of [false, true]) {
+        assert.deepEqual((await f.get('groups', admin)).response.body, expectedGroups);
+        const teams = (await f.get('teams', admin)).response.body;
+        assert.deepEqual(teams.map(row => [row.id, row.organization_id, row.group_ids]), [
+            ['team01', 'BESTI', ['participants', 'besti_senior']],
+            ['Team02', 'BESTI', ['participants', 'besti_fresh']],
+            ['star', 'CWNU', ['observers', 'cwnu']],
+        ], 'only the team account matches selectors; school and account selectors must both match');
+        const events = (await collect((await f.get('event-feed', admin, { stream: 'false' })).response.body)).map(JSON.parse);
+        assert.deepEqual(events.filter(row => row.type === 'groups').map(row => [row.id, row.data]), expectedGroups.map(row => [row.id, row]));
+        assert.deepEqual(events.filter(row => row.type === 'teams').map(row => row.data), teams);
+        assert.ok(events.findLastIndex(row => row.type === 'groups') < events.findIndex(row => row.type === 'teams'));
+    }
+    const { readHydroCcsState } = f.load('source');
+    for (const [domain, contest] of [['system', tid], ['acm', '691000000000000000000003']]) {
+        const snapshot = await readHydroCcsState(domain, new ObjectId(contest), 'admin', new Map(), at(2000));
+        assert.equal(snapshot.has('groups/cwnu'), false);
+        assert.deepEqual(snapshot.get('teams/star').group_ids, ['observers']);
+    }
+    f.settings.groups = JSON.stringify([{ id: 'global', name: 'Shared group', teams: ['team01'] }]);
+    const global = await readHydroCcsState('system', new ObjectId(tid), 'admin', new Map(), at(2000));
+    assert.deepEqual(global.get('teams/team01').group_ids, ['participants', 'global']);
+});
+
+test('custom group scoreboards preserve star and maintainer exclusions and the observers leaderboard', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
+    const f = fixture();
+    t.after(f.dispose);
+    for (const id of [1, 2, 4]) f.users[id].school = '西华师范大学';
+    const original = (await f.get('scoreboard', true)).response.body.rows;
+    f.settings.groups = '[{"id":"cwnu","name":"西华师范大学","schools":["西华师范大学"]}]';
+    assert.deepEqual((await f.get('scoreboard', true)).response.body.rows, original);
+    for (const admin of [false, true]) {
+        const board = (await f.get('scoreboard', admin, { group_id: 'cwnu' })).response.body;
+        assert.deepEqual(board.rows.map(row => [row.team_id, row.rank]), [['team01', 1], ['Team02', 2]]);
+        assert.deepEqual((await f.get('scoreboard', admin, { group_id: 'observers' })).response.body.rows.map(row => [row.team_id, row.rank]), [['star', 1]]);
+    }
+    f.contest.maintainer = [1];
+    const filtered = (await f.get('scoreboard', true, { group_id: 'cwnu' })).response.body.rows;
+    assert.deepEqual(filtered.map(row => [row.team_id, row.rank]), [['Team02', 1]]);
+});
+
+test('custom group and membership changes append resumable events without rewriting history', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
+    const f = fixture();
+    t.after(f.dispose);
+    const feed = async (admin, since_token) => {
+        const response = (await f.get('event-feed', admin, { stream: 'false', since_token })).response;
+        assert.equal(response.status, 200);
+        return (await collect(response.body)).map(JSON.parse);
+    };
+    const history = await Promise.all([feed(false), feed(true)]);
+    for (const [groups, expected] of [
+        [[{ id: 'besti_fresh', name: '北电新生', teams: ['team01'] }], [['groups', 'besti_fresh'], ['teams', 'team01']]],
+        [[{ id: 'besti_fresh', name: '北京电子科技学院新生', teams: ['Team02'] }], [['groups', 'besti_fresh'], ['teams', 'team01'], ['teams', 'Team02']]],
+        [[], [['groups', 'besti_fresh'], ['teams', 'Team02']]],
+    ]) {
+        f.settings.groups = JSON.stringify(groups);
+        for (const admin of [false, true]) {
+            const prior = history[Number(admin)], updates = await feed(admin, prior.at(-1).token);
+            assert.deepEqual(updates.map(row => [row.type, row.id]), expected);
+            if (!groups.length) assert.equal(updates[0].data, null);
+            prior.push(...updates);
+            assert.deepEqual(await feed(admin), prior);
+            const replay = new Map();
+            for (const event of prior) applyCcsChange(replay, event);
+            const currentGroups = (await f.get('groups', admin)).response.body;
+            for (const group of currentGroups) assert.deepEqual(replay.get(`groups/${group.id}`), group);
+            for (const team of (await f.get('teams', admin)).response.body) {
+                assert.deepEqual(replay.get(`teams/${team.id}`), team);
+                assert.ok(team.group_ids.every(id => currentGroups.some(group => group.id === id)));
+            }
+            assert.deepEqual(await feed(admin, prior.at(-1).token), []);
+        }
+    }
+    assert.equal((await f.get('scoreboard', false, { group_id: 'besti_fresh' })).response.status, 400);
+});
+
+test('invalid custom groups publish no partial events and recover with the existing token', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
+    const f = fixture();
+    t.after(f.dispose);
+    const baseline = (await collect((await f.get('event-feed', false, { stream: 'false' })).response.body)).map(JSON.parse);
+    for (const groups of ['{', '{}', '[{"id":"observers","name":"正式队伍","teams":["team01"]}]',
+        '[{"id":"all","name":"Missing selectors"}]']) {
+        f.settings.groups = groups;
+        assert.equal((await f.get('groups')).response.status, 503);
+        assert.equal((await f.get('event-feed', false, { stream: 'false' })).response.status, 503);
+    }
+    f.settings.groups = '';
+    const resumed = (await f.get('event-feed', false, { stream: 'false', since_token: baseline.at(-1).token })).response;
+    assert.equal(resumed.status, 200);
+    assert.deepEqual(await collect(resumed.body), []);
+});
+
 test('JSON resources and NDJSON history both honor freeze, including re-locking; API key and broadcast tokens are isolated', async t => {
     t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
     const f = fixture();
