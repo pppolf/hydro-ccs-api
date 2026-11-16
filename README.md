@@ -13,6 +13,7 @@
 - 直播视图遵守封榜；可选的独立只读密钥读取未封榜视图。
 - 主站与域内比赛隔离，全部比赛访问受显式白名单限制。
 - Hydro 秒级罚时、团队成员提交归属、打星分组和气球颜色。
+- 自动复用比赛所在域的用户组，学校与年级分组无需重复维护账号名单。
 
 当前不支持 OI/IOI 或个人计时的 `duration` 比赛。不提供写操作、选手代码、测试点输入输出、测试点消息、编译日志、题目包、`clarifications`、`awards` 或视频流。`runs` 仅包含测试点标识、判题结果、运行耗时等元数据。这是 Contest API 的一个只读子集，完整资源与兼容边界见 [API 文档](docs/API.md)。
 
@@ -45,7 +46,7 @@ hydrooj addon add /opt/hydro-ccs-api
 | CCS 直播密码 | 空 | 直播独立密码；首次未设置时拒绝 Basic 访问 |
 | CCS 允许读取的比赛 | 空 | `域ID/24位比赛ID`，逗号或空白分隔，最多 100 项 |
 | CCS 组织 ID 映射 | 空 | 学校名称到固定组织 ID 的 JSON 对象，便于提前准备直播 package |
-| CCS 自定义分组 | 空 | 按学校名称、队伍账号名单分组的 JSON 数组，可限定比赛；正式/打星分组自动保留 |
+| CCS 自定义分组（可选） | 空 | 默认自动复用域用户组；仅需额外按学校或队伍账号分组时填写 JSON 数组，可限定比赛 |
 | CCS 未封榜读取密钥 | 空 | 可选 `x-ccs-api-key`；32–1024 个可见 ASCII 字符，不含空白，只读未封榜结果 |
 
 例如：
@@ -82,7 +83,21 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 
 ### 学校与年级分组
 
-在 **CCS 自定义分组**（`hydroCcsApi.groups`）中填写 JSON 数组。可直接复制 [五个分组的配置示例](examples/groups.example.json)，其中北电老生/新生的 `teams` 数组需要填入各自的队伍账号；空数组表示暂不归入任何队伍。
+默认自动复用 Hydro **比赛所在域 → 域管理 → 用户组** 中的分组，不需要在 CCS 中再配置一次名单，也无需安装 `@hydrooj/scoreboard-xcpcio`。主站管理地址为 `/domain/group`，其他域为 `/d/<域ID>/domain/group`。
+
+在用户组中选择实际的 **Hydro 队伍账号** 即可，例如把老生队伍加入 `besti_senior`，新生队伍加入 `besti_fresh`。已有用户组可直接使用。归组按队伍账号 UID 判断，不根据团队成员账号推断；一支队伍可以属于多个组。只导出包含本场有效队伍账号的当前域用户组，不导出无关组、空组或其他域的组；与官方 XCPCIO 一致，数字类组名会被忽略，具体规则见 [API 文档](docs/API.md#域用户组与附加分组)。
+
+用户组名称如 `besti_fresh`、`cwnu` 可直接作为 CCS 分组 ID。中文或不符合 CCS ID 格式的名称保留原显示名，ID 自动使用 `hydro-group-<用户组ObjectId>`；`participants`、`observers` 以及以 `hydro-group-` 开头的组名也使用生成 ID，避免冲突。直播端需要填写 ID 时，以 `/groups` 返回值为准。
+
+`participants`（正式队伍）与 `observers`（打星队伍）自动保留，学校与年级作为附加分组。例如正式新生队的 `group_ids` 为 `["participants", "besti_fresh"]`，西华师大的打星队为 `["observers", "cwnu"]`。组织 ID `CWNU` 和分组 ID `cwnu` 各自独立，不必相同。“全部队伍”由展示端不限制分组实现，无需添加一个 `all` 组。
+
+直播端若另有 `isHidden` / `isOutOfContest` 配置，原 `participants` 保持 `false/false`，`observers` 保持 `false/true`；新增学校、年级分组使用相同 ID，设为 `false/false`。event-feed 的标准分组对象输出 `id`、`name`、`hidden`，所属关系在队伍的 `group_ids` 中。
+
+保存用户组成员变更后，下一次请求或活动事件流轮询（约 2 秒）会同步更新 `/groups`、`/teams` 和 event-feed；最后一支本场队伍移出用户组后，该组也从当前资源中移除。可用 `/scoreboard?group_id=cwnu` 读取该组的正式榜单。默认榜和学校/年级分组榜继续排除打星队及隐藏队伍，`group_id=observers` 保留打星独立榜。历史事件及 token 保留，增删成员或分组会追加变更事件。展示端是否显示分组按钮取决于其对 `groups` 的支持及本身配置。
+
+#### 可选的额外分组
+
+**CCS 自定义分组（可选）**（`hydroCcsApi.groups`）可以留空；原来填写过的名单也可清空，完全改用域用户组。仅需额外按学校名称、账号或比赛范围定义分组时，填写 JSON 数组，例如 [五个分组的配置示例](examples/groups.example.json)。其中北电老生/新生的 `teams` 数组需要填入各自的队伍账号；空数组表示暂不归入任何队伍。
 
 ```json
 [
@@ -98,11 +113,7 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 
 可为某个分组添加 `"contests": ["system/691000000000000000000001"]`，限定生效的域和比赛；省略则适用于所有比赛。多场比赛复用账号时，建议为年级名单限定比赛，避免旧名单影响后续比赛。
 
-`participants`（正式队伍）与 `observers`（打星队伍）自动保留，不能在自定义配置中覆盖。学校与年级是附加分组，例如正式新生队的 `group_ids` 为 `["participants", "besti_fresh"]`，西华师大的打星队为 `["observers", "cwnu"]`。组织 ID `CWNU` 和分组 ID `cwnu` 各自独立，不必相同。“全部队伍”由展示端不限制分组实现，无需添加一个 `all` 组。
-
-直播端若另有 `isHidden` / `isOutOfContest` 配置，原 `participants` 保持 `false/false`，`observers` 保持 `false/true`；新增学校、年级分组使用相同 ID，设为 `false/false`。event-feed 的标准分组对象输出 `id`、`name`、`hidden`，所属关系在队伍的 `group_ids` 中。
-
-保存后，`/groups`、`/teams` 和 event-feed 一起更新；可用 `/scoreboard?group_id=cwnu` 读取该组的正式榜单。默认榜和自定义分组榜继续排除打星队及隐藏队伍，`group_id=observers` 保留打星独立榜。历史事件及 token 保留；调整名单或删除分组会追加变更事件。只有配置过的分组会导出，未配置时仍只有原来的两个分组。展示端是否显示分组按钮取决于其对 `groups` 的支持及本身配置。
+与当前域用户组的导出 ID 相同时，以域用户组的名称和成员为准，旧手动名单不再参与匹配；即使该用户组暂时没有本场队伍，也不会回退到旧名单。不同 ID 的手动分组继续作为补充。不能覆盖 `participants` / `observers`；留空或 `[]` 只清除手动附加分组，不关闭域用户组同步。
 
 ## 接口地址
 

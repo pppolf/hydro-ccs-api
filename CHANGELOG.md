@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Automatically reuse current-domain Hydro user groups for participating team accounts, without duplicate CCS membership configuration or cached-user delays.
+- Keep native group IDs deterministic and CCS-safe, preserve participation status, and let native memberships override same-ID optional manual rules, including empty native groups.
+- Append resumable group and team changes on membership edits/removals; test both views, domain isolation, ID collisions, stable ordering and group-read failures.
 - Add optional school-name-to-organization-ID mappings in Hydro system settings for preparing broadcast packages (for example, `西华师范大学` → `cwnu`).
 - Keep organization resources, team references and both event-feed views consistent; preserve fallback IDs, historical events and existing resume tokens.
 - Validate mapping syntax, IDs and collisions, with regressions for configuration changes and replay.

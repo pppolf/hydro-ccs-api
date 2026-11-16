@@ -17,7 +17,7 @@ export function registerCcsSettings(ctx: Context) {
         setting('password', '', 'password', 'CCS 直播密码', '独立直播密码；首次未设置时禁用 Basic 访问。保存时留空保持原值。', SettingModel.FLAG_SECRET),
         setting('contests', '', 'text', 'CCS 允许读取的比赛', '两种鉴权均仅允许此清单：域ID/24位比赛ID，以逗号或空白分隔。主站域为 system；清空禁止全部比赛。'),
         setting('organizationIds', '', 'textarea', 'CCS 组织 ID 映射', '学校名称到固定 ID 的 JSON 对象，例如 {"西华师范大学":"cwnu"}。名称去除首尾空白后精确匹配；ID 为 1–64 个英文字母、数字、下划线或连字符，不能重复。未配置的学校沿用原哈希 ID；留空清除映射。建议在准备直播 package 前配置。'),
-        setting('groups', '', 'textarea', 'CCS 自定义分组', 'JSON 数组，每项包含 id、name，并用 schools 学校名称列表或 teams 队伍账号列表分组；同时填写须同时匹配。可用 contests 限定域ID/比赛ID列表，省略则适用于所有比赛。正式/打星分组自动保留；留空或 [] 清除自定义分组。示例：[{"id":"cwnu","name":"西华师范大学","schools":["西华师范大学"]}]。'),
+        setting('groups', '', 'textarea', 'CCS 自定义分组（可选）', '默认自动复用比赛所在域的用户组，此项可留空。需要额外分组时填写 JSON 数组，每项包含 id、name 和 schools 学校列表或 teams 队伍账号列表；同时填写须同时匹配。可用 contests 限定域ID/比赛ID列表。与域用户组同 ID 时以域用户组为准。留空或 [] 仅清除额外分组。'),
         setting('adminApiKey', '', 'password', 'CCS 未封榜读取密钥', '可选，只读 x-ccs-api-key，32–1024 个可见 ASCII 字符，不含空白，推荐随机十六进制字符串；可读取允许清单内的未封榜结果。不要交给公开直播。留空保持原值，清空比赛清单可停用全部比赛访问。', SettingModel.FLAG_SECRET),
     ));
     ctx.on('handler/before/SystemSetting', handler => {

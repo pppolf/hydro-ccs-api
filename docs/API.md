@@ -29,7 +29,7 @@ API 基址为 `/api/ccs`，域内为 `/d/<domain>/api/ccs`。所有资源均为 
 | `/contests/:id/state` | 开始、结束、封榜、解封状态 |
 | `/contests/:id/access` | 本实现支持的实体字段；写入能力列表为空 |
 | `/contests/:id/teams` | 队伍、所属组织、组别及隐藏标记 |
-| `/contests/:id/groups` | `participants` 正式队、`observers` 打星队及配置的学校/年级等自定义分组 |
+| `/contests/:id/groups` | `participants` 正式队、`observers` 打星队、当前域用户组及可选手动附加分组 |
 | `/contests/:id/organizations` | 学校/组织 |
 | `/contests/:id/problems` | 题号、顺序、标题、气球 `color`/`rgb`、可确定时的测试点总数 `test_data_count` |
 | `/contests/:id/languages` | 语言 |
@@ -38,7 +38,7 @@ API 基址为 `/api/ccs`，域内为 `/d/<domain>/api/ccs`。所有资源均为 
 | `/contests/:id/judgements` | 判题状态和最终结果，不含编译日志 |
 | `/contests/:id/runs` | 逐测试点完成结果；不含输入输出、文件路径、测试点消息 |
 | `/contests/:id/<集合>/:objectId` | 上述集合中单个对象 |
-| `/contests/:id/scoreboard` | 正式榜单；可用 `group_id=participants` 或 `group_id=observers` |
+| `/contests/:id/scoreboard` | 正式榜单；可用 `group_id=<分组ID>` 筛选，`group_id=observers` 为打星独立榜 |
 | `/contests/:id/event-feed` | 持续 NDJSON 事件流 |
 
 仅支持固定起止时间的 Hydro `acm` 比赛。OI/IOI、个人计时比赛返回 400。不存在的比赛/资源返回 404。
@@ -85,9 +85,19 @@ HydroJudge 的 `performance` 模式会缓存测试点直到结束；部分版本
 
 CCS 队伍 ID 使用 Hydro 队伍账号用户名，`team_id` 引用相同值；团队成员的提交根据原生 journal 和成员关系归属。比赛管理员账号标记 `hidden: true` 并排除出榜单。打星队保留展示，默认正式排名排除打星队；指定 `group_id=observers` 可取打星独立榜。
 
-## 自定义分组
+## 域用户组与附加分组
 
-`hydroCcsApi.groups` 接受 JSON 文本数组，每项定义一个附加分组。默认空配置，保留原 `participants` / `observers` 的 ID 和含义。配置示例见 [groups.example.json](../examples/groups.example.json)。
+默认读取比赛所在域的 `UserModel.listGroup(domainId)`，复用 Hydro **域管理 → 用户组** 中的成员关系，无需填写 CCS 分组设置。每次快照直接读取用户组，不依赖缓存的 `User.group`。只有包含本场有效队伍账号 UID 的组才导出；团队成员 UID 不会使其队伍自动归组，也不导出其他域、无关或空用户组。与官方 XCPCIO 一致，满足 `Number.isSafeInteger(+name)` 的组名会被忽略，包括数字账号组。
+
+分组 `name` 保留 Hydro 用户组名称。若组名满足 `[a-zA-Z0-9_.-]{1,36}`、不以 `-` / `.` 开头、不以 `.` 结尾，且不等于 `participants` / `observers`、不以 `hydro-group-` 开头，则直接作为 `id`；否则使用 `hydro-group-<用户组的24位ObjectId>`。这保证中文名称可用且不会覆盖内置分组，生成 ID 依赖该用户组文档的持久 ID。
+
+内置 `participants` / `observers` 的 ID 和含义保持不变。队伍 `group_ids` 第一项仍由 `unrank` 决定为 `participants` / `observers`，之后按 ID 排序追加所属域用户组，最后按配置顺序追加匹配的手动分组。学校分组与 `organization_id` 独立，组织 ID 映射不会改变用户组成员。
+
+用户组增删成员会在下一次请求或轮询时生成队伍更新；最后一支本场队伍移出或组被删除后，输出该组的删除事件。用户组读取失败时返回 503，不提交部分状态或误删已有分组。
+
+### 可选手动分组
+
+`hydroCcsApi.groups` 接受 JSON 文本数组，每项定义一个额外分组，默认空配置。已有域用户组不需要在这里重复定义。配置示例见 [groups.example.json](../examples/groups.example.json)。
 
 | 字段 | 含义 |
 | --- | --- |
@@ -97,9 +107,13 @@ CCS 队伍 ID 使用 Hydro 队伍账号用户名，`team_id` 引用相同值；�
 | `teams` | 可选的队伍账号用户名字符串数组，与 `teams[].id` 精确匹配，区分大小写；不依据团队成员账号归组 |
 | `contests` | 可选的非空 `域ID/24位比赛ID` 字符串数组；省略时适用于所有域和比赛 |
 
-每项必须至少填写 `schools` / `teams` 之一；同时填写时按交集匹配。选择条件省略表示不限制，显式 `[]` 表示没有队伍匹配；不同分组可重叠，同一队伍可属于多个组。名单值去除首尾空白并去重。空配置或 `[]` 清除所有自定义分组；非法配置保存时拒绝，绕过设置页写入时返回 503，不发布不完整状态。
+每项必须至少填写 `schools` / `teams` 之一；同时填写时按交集匹配。选择条件省略表示不限制，显式 `[]` 表示没有队伍匹配；不同分组可重叠，同一队伍可属于多个组。名单值去除首尾空白并去重。空配置或 `[]` 仅清除手动分组，保留域用户组同步；非法配置保存时拒绝，绕过设置页写入时返回 503，不发布不完整状态。
 
-当前比赛范围内配置的分组即使没有队伍也会输出，形如 `{"id":"besti_fresh","name":"北京电子科技学院新生","hidden":false}`；不输出匹配规则或其他比赛的名单。队伍 `group_ids` 的第一项仍由 `unrank` 决定为 `participants` / `observers`，后面按配置顺序追加匹配的分组 ID。学校分组与 `organization_id` 独立，组织 ID 映射不会改变分组匹配。
+手动分组 ID 与当前域用户组的导出 ID 冲突时，以域用户组的名称和成员为准，手动规则整项忽略。即使该用户组暂时没有本场队伍，也会占用该 ID，防止旧名单将已移出的队伍重新加入；删除域用户组后，同 ID 的手动规则可重新生效。迁移到纯用户组管理时，可清空手动设置以避免旧规则回退。
+
+除上述冲突外，当前比赛范围内配置的手动分组即使没有队伍也会输出，形如 `{"id":"besti_fresh","name":"北京电子科技学院新生","hidden":false}`；不输出匹配规则或其他比赛的名单。
+
+### 事件与榜单
 
 两种鉴权视图使用同一分组规则，保持各自的封榜策略。`/groups`、单分组对象、`/teams` 和 event-feed 使用相同对象和 ID；先发布新增分组，再发布引用它的队伍。修改名称、名单或清除配置会追加变更/删除事件，历史事件和既有 token 不变。`/scoreboard?group_id=<id>` 返回该分组内的正式排名，继续排除打星及隐藏队伍；只有 `group_id=observers` 单独计算打星榜。未知分组返回 400。
 

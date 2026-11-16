@@ -1,3 +1,17 @@
+import type { GDoc } from 'hydrooj';
+
+/** Read membership from domain groups, without relying on cached User.group. */
+export function ccsDomainGroups(groups: GDoc[], teamUids: ReadonlySet<number>) {
+    return groups.filter(group => !Number.isSafeInteger(+group.name)).map(group => {
+        // CLICS IDs are ASCII and at most 36 characters. Reserve the generated
+        // namespace so even a user group named after another group's ID is safe.
+        const useName = /^(?![-.])(?!.*\.$)[a-zA-Z0-9_.-]{1,36}$/.test(group.name)
+            && !['participants', 'observers'].includes(group.name) && !group.name.startsWith('hydro-group-');
+        return { id: useName ? group.name : `hydro-group-${group._id}`, name: group.name,
+            uids: new Set(group.uids.filter(uid => teamUids.has(uid))) };
+    }).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
 export type CcsGroupRule = {
     id: string;
     name: string;

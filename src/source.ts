@@ -3,7 +3,7 @@ import { digest, duration, entityKey, hydroVerdicts, judgementTypes, type CcsObj
 import { addCcsRuns } from './runs';
 import { ccsOrganizationIds } from './organizations';
 import { ccsSetting } from './settings';
-import { ccsGroups, ccsTeamGroupIds, type CcsGroupRule } from './groups';
+import { ccsDomainGroups, ccsGroups, ccsTeamGroupIds, type CcsGroupRule } from './groups';
 
 export class CcsError extends Error {
     constructor(public status: number, message: string) { super(message); }
@@ -40,15 +40,22 @@ export async function readHydroCcsState(domainId: string, tid: ObjectId, visibil
     let groups: CcsGroupRule[];
     try { groups = ccsGroups(ccsSetting('groups')).filter(group => !group.contests || group.contests.includes(`${domainId}/${tid}`)); }
     catch { throw new CcsError(503, 'CCS custom group configuration is invalid'); }
-    const [participants, records, problems] = await Promise.all([
+    const [participants, records, problems, domainGroups] = await Promise.all([
         ContestModel.getMultiStatus(domainId, { docId: tid }).project({ uid: 1, attend: 1, unrank: 1, members: 1, journal: 1 }).toArray(),
         RecordModel.getMulti(domainId, { contest: tid }).project({ _id: 1, uid: 1, pid: 1, lang: 1, status: 1, judgeAt: 1,
             'testCases.id': 1, 'testCases.subtaskId': 1, 'testCases.status': 1, 'testCases.time': 1 }).sort({ _id: 1 }).toArray(),
         // getList resolves referenced problems and parses their test configuration.
         ProblemModel.getList(domainId, contest.pids, true, false, ['docId', 'title', 'config']),
+        UserModel.listGroup(domainId),
     ]);
     const uids = [...new Set<number>(participants.flatMap(row => [row.uid, ...(row.members || [])]).concat(records.map(row => row.uid)))];
     const users = uids.length ? await UserModel.getList(domainId, uids) : {};
+    const teamUids = new Set<number>(participants.filter(row => users[row.uid]?._id === row.uid && users[row.uid].uname).map(row => row.uid));
+    const nativeGroups = ccsDomainGroups(domainGroups, teamUids);
+    // An existing domain group owns its membership even if it currently has
+    // no contest teams; old manual lists must not re-add removed members.
+    const nativeGroupIds = new Set(nativeGroups.map(group => group.id));
+    groups = groups.filter(group => !nativeGroupIds.has(group.id));
     const state: CcsState = new Map();
     const add = (type: string, data: CcsObject) => state.set(entityKey(type, ['contest', 'state'].includes(type) ? null : data.id), data);
     add('contest', contestObject(contest));
@@ -64,6 +71,7 @@ export async function readHydroCcsState(domainId: string, tid: ObjectId, visibil
     }
     add('groups', { id: 'participants', name: '正式队伍', hidden: false });
     add('groups', { id: 'observers', name: '打星队伍', hidden: false });
+    for (const group of nativeGroups) if (group.uids.size) add('groups', { id: group.id, name: group.name, hidden: false });
     for (const group of groups) add('groups', { id: group.id, name: group.name, hidden: false });
     const maintainers = new Set(contest.maintainer || []);
     const teamIds = new Map<number, string>();
@@ -85,7 +93,8 @@ export async function readHydroCcsState(domainId: string, tid: ObjectId, visibil
             add('organizations', { id: organizationId, name: school, formal_name: school });
         }
         add('teams', { id: user.uname, label: String(user.seat || uid), name: user.displayName || user.uname,
-            organization_id: organizationId, group_ids: [participant.unrank ? 'observers' : 'participants', ...ccsTeamGroupIds(groups, school, user.uname)], hidden: maintainers.has(uid),
+            organization_id: organizationId, group_ids: [participant.unrank ? 'observers' : 'participants',
+                ...nativeGroups.filter(group => group.uids.has(uid)).map(group => group.id), ...ccsTeamGroupIds(groups, school, user.uname)], hidden: maintainers.has(uid),
             x_hydro_username: user.uname,
             x_hydro_usernames: [...new Set([uid, ...(participant.members || [])].filter(id => users[id]?._id === id).map(id => users[id].uname))] });
     }

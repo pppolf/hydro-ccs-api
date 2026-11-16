@@ -154,6 +154,7 @@ class ObjectId {
     toHexString() { return this.value; }
     getTimestamp() { return new Date(parseInt(this.value.slice(0, 8), 16) * 1000); }
 }
+const domainGroup = (name, uids, id, domainId = 'acm') => ({ name, uids, domainId, _id: new ObjectId(id.toString(16).padStart(24, '0')) });
 function fixture() {
     const calls = [], settings = { username: 'broadcast', password: 'secret', contests: `acm/${tid}`, adminApiKey: 'a'.repeat(64) };
     const contest = { docId: new ObjectId(tid), rule: 'acm', title: 'XCPC 公开测试', pids: [1], beginAt: at(0), endAt: at(3600), lockAt: at(1800), unlocked: false };
@@ -203,6 +204,7 @@ function fixture() {
     const users = { 1: { _id: 1, uname: 'team01', school: 'University', password: 'PRIVATE_PASSWORD' },
         2: { _id: 2, uname: 'Team02', displayName: 'Team 2' }, 3: { _id: 3, uname: 'member03' },
         4: { _id: 4, uname: 'star' }, 5: { _id: 0, uname: 'Unknown User' } };
+    const userGroups = [];
     const hydro = { Handler, Context: class {}, ConnectionHandler: class {}, ObjectId, ValidationError: Error,
         BadRequestError: Error, ForbiddenError: Error, CreateError: () => Error, param: () => () => {}, PERM: {}, PRIV: {}, Types: { ObjectId: {} },
         SystemModel: { get: key => settings[key.replace('hydroCcsApi.', '')] },
@@ -212,7 +214,11 @@ function fixture() {
             getMulti: () => query([contest]), getMultiStatus: () => query(participants) },
         RecordModel: { getMulti: (domain, filter) => { calls.push(['records', domain, filter]); return query(records); } },
         ProblemModel: { getList: async () => structuredClone(problems) },
-        UserModel: { getList: async () => users },
+        UserModel: { getList: async () => users,
+            listGroup: async domain => {
+                calls.push(['userGroups', domain]);
+                return userGroups.filter(group => group.domainId === domain).map(group => ({ ...group, uids: [...group.uids] }));
+            } },
     };
     const load = loader(hydro), routes = new Map(), hooks = {}, disposers = [], router = new Router();
     router.use(async (c, next) => { c.set('X-Test-Middleware', 'preserved'); await next(); });
@@ -237,7 +243,7 @@ function fixture() {
         const h = new Handler(); h.args = args; h.request.headers = admin ? { 'x-ccs-api-key': 'a'.repeat(64) } : headers;
         await h.get({ domainId: 'acm', contestId: tid, endpoint }); return h;
     }
-    return { contest, records, participants, problems, users, calls, settings, headers, get, load, routes, hooks, isCcs, hydro, ctx,
+    return { contest, records, participants, problems, users, userGroups, calls, settings, headers, get, load, routes, hooks, isCcs, hydro, ctx,
         dispose: () => { for (const dispose of disposers.reverse()) dispose(); } };
 }
 
@@ -477,6 +483,144 @@ test('invalid custom groups publish no partial events and recover with the exist
     const resumed = (await f.get('event-feed', false, { stream: 'false', since_token: baseline.at(-1).token })).response;
     assert.equal(resumed.status, 200);
     assert.deepEqual(await collect(resumed.body), []);
+});
+
+test('domain user groups automatically populate both feeds using current team-account membership', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
+    const f = fixture();
+    t.after(f.dispose);
+    f.userGroups.push(domainGroup('besti_senior', [1, 3], 1), domainGroup('besti_fresh', [2], 2),
+        domainGroup('cwnu', [1, 4], 3), domainGroup('unrelated', [99], 4), domainGroup('empty', [], 5),
+        domainGroup('1', [1], 6), domainGroup('member_only', [3], 7), domainGroup('missing_user', [5], 8),
+        domainGroup('other_domain', [1], 9, 'system'));
+    f.users[1].group = ['stale_user_cache'];
+    f.users[2].group = ['besti_senior'];
+    const expected = [{ id: 'participants', name: '正式队伍', hidden: false }, { id: 'observers', name: '打星队伍', hidden: false },
+        ...['besti_fresh', 'besti_senior', 'cwnu'].map(id => ({ id, name: id, hidden: false }))];
+    for (const admin of [false, true]) {
+        assert.deepEqual((await f.get('groups', admin)).response.body, expected);
+        const teams = (await f.get('teams', admin)).response.body;
+        assert.deepEqual(teams.map(row => [row.id, row.group_ids]), [
+            ['team01', ['participants', 'besti_senior', 'cwnu']],
+            ['Team02', ['participants', 'besti_fresh']],
+            ['star', ['observers', 'cwnu']],
+        ]);
+        const feed = (await collect((await f.get('event-feed', admin, { stream: 'false' })).response.body)).map(JSON.parse);
+        assert.deepEqual(feed.filter(row => row.type === 'groups').map(row => row.data), expected);
+        assert.deepEqual(feed.filter(row => row.type === 'teams').map(row => row.data), teams);
+        assert.ok(feed.findLastIndex(row => row.type === 'groups') < feed.findIndex(row => row.type === 'teams'));
+        assert.deepEqual((await f.get('scoreboard', admin, { group_id: 'cwnu' })).response.body.rows.map(row => row.team_id), ['team01']);
+        assert.deepEqual((await f.get('scoreboard', admin, { group_id: 'observers' })).response.body.rows.map(row => row.team_id), ['star']);
+    }
+    assert.ok(f.calls.filter(row => row[0] === 'userGroups').every(row => row[1] === 'acm'));
+    const snapshot = await f.load('source').readHydroCcsState('system', new ObjectId(tid), 'admin', new Map(), at(2000));
+    assert.equal(snapshot.has('groups/besti_fresh'), false);
+    assert.deepEqual(snapshot.get('teams/team01').group_ids, ['participants', 'other_domain']);
+});
+
+test('domain group names get safe distinct IDs without overriding built-in participation groups', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
+    const f = fixture();
+    t.after(f.dispose);
+    const chinese = domainGroup('北京电子科技学院新生', [2], 100);
+    const chineseId = `hydro-group-${chinese._id}`;
+    f.userGroups.push(chinese, domainGroup('participants', [4], 101), domainGroup('observers', [1], 102),
+        domainGroup(chineseId, [1], 103), domainGroup('group.with.dot', [1], 104), domainGroup('a'.repeat(37), [1], 105));
+    const groups = (await f.get('groups')).response.body;
+    assert.equal(new Set(groups.map(group => group.id)).size, groups.length);
+    assert.ok(groups.every(group => /^(?![-.])(?!.*\.$)[a-zA-Z0-9_.-]{1,36}$/.test(group.id)));
+    assert.equal(groups.find(group => group.id === chineseId).name, '北京电子科技学院新生');
+    assert.equal(groups.find(group => group.id === 'participants').name, '正式队伍');
+    assert.equal(groups.find(group => group.id === 'observers').name, '打星队伍');
+    assert.ok(groups.some(group => group.id === `hydro-group-${f.userGroups[3]._id}` && group.name === chineseId));
+    assert.ok(groups.some(group => group.id === 'group.with.dot'));
+    const teams = (await f.get('teams')).response.body;
+    assert.deepEqual(teams.find(team => team.id === 'Team02').group_ids, ['participants', chineseId]);
+    assert.deepEqual(teams.find(team => team.id === 'star').group_ids, ['observers', `hydro-group-${f.userGroups[1]._id}`]);
+    assert.equal(teams.find(team => team.id === 'team01').group_ids.includes('observers'), false);
+    chinese.name = '北电新生';
+    const renamed = (await f.get('groups')).response.body;
+    assert.equal(renamed.find(group => group.id === chineseId).name, '北电新生', 'generated IDs follow the persistent Hydro group ID');
+});
+
+test('domain group membership takes precedence over optional manual groups even after its last member is removed', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
+    const f = fixture();
+    t.after(f.dispose);
+    const native = domainGroup('besti_fresh', [2], 1);
+    f.userGroups.push(native);
+    f.settings.groups = JSON.stringify([
+        { id: 'besti_fresh', name: 'Old manual list', teams: ['team01', 'star'] },
+        { id: 'extra', name: 'Extra group', teams: ['team01'] },
+    ]);
+    assert.deepEqual((await f.get('teams')).response.body.map(team => [team.id, team.group_ids]), [
+        ['team01', ['participants', 'extra']], ['Team02', ['participants', 'besti_fresh']], ['star', ['observers']],
+    ]);
+    assert.deepEqual((await f.get('groups')).response.body.find(group => group.id === 'besti_fresh'), { id: 'besti_fresh', name: 'besti_fresh', hidden: false });
+    native.uids = [];
+    assert.equal((await f.get('groups')).response.body.some(group => group.id === 'besti_fresh'), false);
+    assert.ok((await f.get('teams')).response.body.every(team => !team.group_ids.includes('besti_fresh')));
+    f.settings.groups = '';
+    native.uids = [2];
+    assert.deepEqual((await f.get('teams')).response.body.find(team => team.id === 'Team02').group_ids, ['participants', 'besti_fresh']);
+});
+
+test('domain membership edits and removals append resumable changes without stale user-cache groups or order noise', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
+    const f = fixture();
+    t.after(f.dispose);
+    const fresh = domainGroup('besti_fresh', [1], 1), school = domainGroup('cwnu', [4], 2);
+    f.userGroups.push(fresh, school);
+    f.users[1].group = ['besti_fresh'];
+    const read = async (admin, since_token) => {
+        const response = (await f.get('event-feed', admin, { stream: 'false', since_token })).response;
+        assert.equal(response.status, 200);
+        return (await collect(response.body)).map(JSON.parse);
+    };
+    const history = await Promise.all([read(false), read(true)]);
+    fresh.uids = [2];
+    for (const admin of [false, true]) {
+        const log = history[Number(admin)], updates = await read(admin, log.at(-1).token);
+        assert.deepEqual(updates.map(row => [row.type, row.id, row.data.group_ids]), [
+            ['teams', 'team01', ['participants']], ['teams', 'Team02', ['participants', 'besti_fresh']],
+        ]);
+        log.push(...updates);
+    }
+    f.userGroups.reverse();
+    for (const admin of [false, true]) assert.deepEqual(await read(admin, history[Number(admin)].at(-1).token), []);
+    fresh.uids = [];
+    f.userGroups.splice(f.userGroups.indexOf(school), 1);
+    for (const admin of [false, true]) {
+        const log = history[Number(admin)], updates = await read(admin, log.at(-1).token);
+        assert.deepEqual(updates.filter(row => row.type === 'groups').map(row => [row.id, row.data]), [['besti_fresh', null], ['cwnu', null]]);
+        log.push(...updates);
+        assert.deepEqual(await read(admin), log, 'historical events and tokens remain unchanged');
+        const replay = new Map();
+        for (const event of log) applyCcsChange(replay, event);
+        assert.equal(replay.has('groups/besti_fresh'), false);
+        assert.equal(replay.has('groups/cwnu'), false);
+        for (const team of (await f.get('teams', admin)).response.body) {
+            assert.deepEqual(replay.get(`teams/${team.id}`), team);
+            assert.equal(team.group_ids.length, 1);
+        }
+    }
+});
+
+test('failed domain group reads do not erase existing group memberships or advance the event cursor', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
+    const f = fixture();
+    t.after(f.dispose);
+    f.userGroups.push(domainGroup('besti_fresh', [1], 1));
+    const baseline = (await collect((await f.get('event-feed', false, { stream: 'false' })).response.body)).map(JSON.parse);
+    const readGroups = f.hydro.UserModel.listGroup;
+    f.hydro.UserModel.listGroup = async () => { throw new Error('database unavailable'); };
+    assert.equal((await f.get('groups')).response.status, 503);
+    assert.equal((await f.get('event-feed', false, { stream: 'false' })).response.status, 503);
+    f.hydro.UserModel.listGroup = readGroups;
+    const resumed = (await f.get('event-feed', false, { stream: 'false', since_token: baseline.at(-1).token })).response;
+    assert.equal(resumed.status, 200);
+    assert.deepEqual(await collect(resumed.body), []);
+    assert.deepEqual((await f.get('teams')).response.body.find(team => team.id === 'team01').group_ids, ['participants', 'besti_fresh']);
 });
 
 test('JSON resources and NDJSON history both honor freeze, including re-locking; API key and broadcast tokens are isolated', async t => {
