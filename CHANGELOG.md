@@ -9,4 +9,5 @@
 - Isolated event collections and token namespace from the original integration.
 - Cancelled active streams when the addon is unloaded.
 - Added installation/API documentation, ICPC Live/CDS examples and GitHub Actions.
+- Aligned unfrozen API-key validation with HTTP clients: visible ASCII without whitespace, 32–1024 characters.
 - Licensed the standalone addon under MIT.

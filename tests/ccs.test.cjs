@@ -374,6 +374,7 @@ test('independent API key is disabled by default, bounded, constant-time compare
     assert.equal(ccsApiKeyAuthorized(key, key), true);
     for (const configured of [undefined, '', 'short', 'a'.repeat(1025)]) assert.equal(ccsApiKeyAuthorized(key, configured), false);
     for (const header of [undefined, ['a'.repeat(64)], 'b'.repeat(64), 'a'.repeat(1025)]) assert.equal(ccsApiKeyAuthorized(header, key), false);
+    for (const invalid of ['a'.repeat(32) + ' b', '密'.repeat(32), 'a'.repeat(32) + '\t']) assert.equal(ccsApiKeyAuthorized(invalid, invalid), false);
     const f = fixture(), Request = f.routes.get('/api/ccs/contests/:contestId/:endpoint');
     const h = new Request();
     h.request.headers = { ...f.headers, 'x-ccs-api-key': 'wrong' };

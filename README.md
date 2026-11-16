@@ -23,10 +23,10 @@
 
 ## 安装
 
-将本仓库下载或克隆到 Hydro 服务可以读取的目录。例如仓库发布后，将下面的 `<owner>` 替换为实际 GitHub 用户或组织：
+将本仓库下载或克隆到 Hydro 服务可以读取的目录：
 
 ```sh
-git clone https://github.com/<owner>/hydro-ccs-api.git /opt/hydro-ccs-api
+git clone https://github.com/pppolf/hydro-ccs-api.git /opt/hydro-ccs-api
 hydrooj addon add /opt/hydro-ccs-api
 ```
 
@@ -43,7 +43,7 @@ hydrooj addon add /opt/hydro-ccs-api
 | CCS 直播用户名 | `ccs` | HTTP Basic 用户名，无需创建同名 Hydro 用户 |
 | CCS 直播密码 | 空 | 直播独立密码；首次未设置时拒绝 Basic 访问 |
 | CCS 允许读取的比赛 | 空 | `域ID/24位比赛ID`，逗号或空白分隔，最多 100 项 |
-| CCS 未封榜读取密钥 | 空 | 可选 `x-ccs-api-key`；32–1024 字符，只读未封榜结果 |
+| CCS 未封榜读取密钥 | 空 | 可选 `x-ccs-api-key`；32–1024 个可见 ASCII 字符，不含空白，只读未封榜结果 |
 
 例如：
 
@@ -106,6 +106,18 @@ curl --fail --no-buffer --user ccs "https://hydro.example/api/ccs/contests/69100
 
 独立部署后重新配置账号和允许清单，修改 Live/CDS 地址并清除其旧事件游标，从新事件流建立基线。若原监考平台仍使用内置接口，保留其原配置；独立插件不提供旧监考专用协议适配。
 
+监考插件 `cwnupaa-proctor-auth 0.4.0` 已移除内置 CCS。配套新版监考 Web/Recorder 通过 HTTP 消费本插件：在 Hydro 设置比赛允许清单与 `hydroCcsApi.adminApiKey`，在 Web 和 Recorder 的服务端环境设置 `REACTION_HYDRO_CCS_ORIGIN`（仅协议、主机、端口）和 `REACTION_HYDRO_CCS_API_KEY`（同一独立读取密钥）。考试地址保留 `/d/域ID`；Recorder 使用 `x_hydro_username(s)` / `x_hydro_rank` 并单独保存新游标，不复用评测密钥。
+
+监考侧代码、部署流程和消费测试由监考仓库维护；本插件不依赖它，也不负责录像采集或生成。旧日志不会自动导入，新日志的初始基线不能补造旧历史名次。
+
+## 独立更新与兼容性
+
+以后 CCS 的 API、计分、封榜、字段映射与事件日志只在本仓库修改和测试。将兼容版本部署到 Hydro **实际加载的本插件目录**并重启 Hydro，消费者通过 HTTP 重连即可，不需要把源码复制回监考仓库，也不需要重新构建监考客户端。
+
+1.x 保持现有路径、鉴权、事件与扩展字段含义兼容；新增可选字段/资源不要求消费者同步升级。删除或重命名必需字段、改变鉴权/事件含义等不兼容变更应发布主版本，并给出消费端迁移说明。兼容升级保留日志 scope 和现有 token，除非明确发布日志迁移步骤。
+
+更新前备份配置和两套日志集合，先在测试比赛验证；部署后确认 API 元信息版本、续传、Basic 封榜和未封榜读取正常。数据库日志不随源码包覆盖，详见 [部署验收](docs/DEPLOYMENT.md)。
+
 ## 开发与验证
 
 ```sh
@@ -120,16 +132,9 @@ Hydro 分发的是 TypeScript 源码，并使用非严格编译选项。本插�
 
 本仓库包含 [GitHub Actions](.github/workflows/ci.yml)，在 Node.js 22/24 上执行安装、类型检查、测试和打包检查。当前验证范围不等同于真实 Hydro/Mongo 部署验收；上线前按 [验收步骤](docs/DEPLOYMENT.md) 检查实际服务器。
 
-## 发布到 GitHub
+## 仓库与分发
 
-在 GitHub 创建空仓库后，关联该目录的独立 Git 仓库并推送：
-
-```sh
-git remote add origin https://github.com/<owner>/hydro-ccs-api.git
-git push -u origin main
-```
-
-可用 `npm pack` 生成可安装的源码包；不需要发布到 npm 才能作为 Hydro 本地插件使用。
+源码与问题反馈：[pppolf/hydro-ccs-api](https://github.com/pppolf/hydro-ccs-api)。可用 `npm pack` 生成可安装的源码包；不需要发布到 npm 才能作为 Hydro 本地插件使用。
 
 ## License
 

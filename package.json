@@ -3,6 +3,12 @@
   "version": "1.0.0",
   "description": "Standalone read-only ICPC Contest API for Hydro XCPC contests.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pppolf/hydro-ccs-api.git"
+  },
+  "homepage": "https://github.com/pppolf/hydro-ccs-api#readme",
+  "bugs": "https://github.com/pppolf/hydro-ccs-api/issues",
   "main": "index.ts",
   "engines": {
     "node": "^22.18.0 || >=24.11.0"

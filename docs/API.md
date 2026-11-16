@@ -2,12 +2,15 @@
 
 采用 ICPC Contest API 2023-06 的 JSON 资源及 NDJSON 事件表示。以下是已实现的只读子集，不声称完整标准兼容。
 
+本仓库是这些服务端行为的唯一维护入口。1.x 的消费者可依赖现有路径、鉴权、事件格式及 `x_hydro_*` 字段含义；应忽略未知资源类型和新增可选字段。不兼容变更在主版本及迁移说明中明确发布，兼容更新保持日志 scope/token 可续传。
+
 ## 鉴权与地址
 
 API 基址为 `/api/ccs`，域内为 `/d/<domain>/api/ccs`。所有资源均为 GET，包括 API 元信息也要求鉴权。
 
 - `Authorization: Basic ...`：直播视图，遵守 Hydro 封榜。
 - `x-ccs-api-key: ...`：可选的未封榜只读视图，默认关闭。
+- 未封榜读取密钥须为 32–1024 个可见 ASCII 字符且不含空白，推荐随机十六进制字符串；Basic 密码仍可使用 UTF-8 文本。
 - 两种方式都只允许 `hydroCcsApi.contests` 中的比赛。
 - 若请求携带错误的 `x-ccs-api-key`，即使 Basic 正确也拒绝，避免意外切换视图。
 - 不接受 URL 查询参数里的密码/密钥，不使用 Hydro 登录 Cookie 鉴权。

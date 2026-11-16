@@ -13,9 +13,12 @@ export function ccsBasicAuthorized(header: unknown, username: unknown, password:
     return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
+export function validCcsApiKey(value: unknown): value is string {
+    return typeof value === 'string' && /^[\x21-\x7e]{32,1024}$/.test(value);
+}
+
 export function ccsApiKeyAuthorized(header: unknown, configuredKey: unknown) {
-    if (typeof header !== 'string' || typeof configuredKey !== 'string'
-        || configuredKey.length < 32 || configuredKey.length > 1024 || header.length > 1024) return false;
+    if (typeof header !== 'string' || !validCcsApiKey(configuredKey) || header.length > 1024) return false;
     const actual = Buffer.from(header), expected = Buffer.from(configuredKey);
     return actual.length === expected.length && timingSafeEqual(actual, expected);
 }

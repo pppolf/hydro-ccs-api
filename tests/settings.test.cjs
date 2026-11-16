@@ -54,7 +54,7 @@ test('native save hook validates flat and nested settings before any writes', ()
         for (const contests of ['*/691000000000000000000001', 'system/not-a-contest', ['system/691000000000000000000001']]) {
             assert.throws(() => save({ 'hydroCcsApi.contests': contests }), ValidationError);
         }
-        for (const adminApiKey of ['short', 'a'.repeat(1025), 'a'.repeat(32) + '\n']) {
+        for (const adminApiKey of ['short', 'a'.repeat(1025), 'a'.repeat(32) + '\n', 'a'.repeat(32) + ' b', '密'.repeat(32), 'a'.repeat(32) + '\t']) {
             assert.throws(() => save({ hydroCcsApi: { adminApiKey } }), ValidationError);
         }
         assert.doesNotThrow(() => save({ hydroCcsApi: { username: 'ccs', password: '', adminApiKey: '', contests: '' } }));

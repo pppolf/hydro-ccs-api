@@ -1,5 +1,5 @@
 import { Context, SettingModel, SystemModel, ValidationError } from 'hydrooj';
-import { ccsContestAllowlist } from './auth';
+import { ccsContestAllowlist, validCcsApiKey } from './auth';
 
 export const SETTING_PREFIX = 'hydroCcsApi.';
 export const SETTING_FAMILY = 'setting_hydro_ccs_api';
@@ -14,7 +14,7 @@ export function registerCcsSettings(ctx: Context) {
         setting('username', 'ccs', 'text', 'CCS 直播用户名', 'HTTP Basic 用户名，不是 Hydro 登录账号。'),
         setting('password', '', 'password', 'CCS 直播密码', '独立直播密码；首次未设置时禁用 Basic 访问。保存时留空保持原值。', SettingModel.FLAG_SECRET),
         setting('contests', '', 'text', 'CCS 允许读取的比赛', '两种鉴权均仅允许此清单：域ID/24位比赛ID，以逗号或空白分隔。主站域为 system；清空禁止全部比赛。'),
-        setting('adminApiKey', '', 'password', 'CCS 未封榜读取密钥', '可选，只读 x-ccs-api-key，32–1024 个字符；可读取允许清单内的未封榜结果。不要交给公开直播。留空保持原值，清空比赛清单可停用全部比赛访问。', SettingModel.FLAG_SECRET),
+        setting('adminApiKey', '', 'password', 'CCS 未封榜读取密钥', '可选，只读 x-ccs-api-key，32–1024 个可见 ASCII 字符，不含空白，推荐随机十六进制字符串；可读取允许清单内的未封榜结果。不要交给公开直播。留空保持原值，清空比赛清单可停用全部比赛访问。', SettingModel.FLAG_SECRET),
     ));
     ctx.on('handler/before/SystemSetting', handler => {
         if (String(handler.request.method).toLowerCase() !== 'post') return;
@@ -38,8 +38,8 @@ export function registerCcsSettings(ctx: Context) {
             if (typeof value !== 'string' || value.length > 1024 || /[\r\n]/.test(value)) {
                 invalid(key, '密钥或密码须为不超过 1024 字符的单行文本');
             }
-            if (key === 'adminApiKey' && (value.length < 32 || value !== value.trim())) {
-                invalid(key, '未封榜读取密钥至少需要 32 个字符，且不能有首尾空格');
+            if (key === 'adminApiKey' && !validCcsApiKey(value)) {
+                invalid(key, '未封榜读取密钥须为 32–1024 个可见 ASCII 字符且不含空白，推荐使用随机十六进制字符串');
             }
         }
     });
