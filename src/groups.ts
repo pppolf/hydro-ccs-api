@@ -1,4 +1,18 @@
-import type { GDoc } from 'hydrooj';
+import type { GDoc, User } from 'hydrooj';
+
+/** Server-side extension: a scoreboard addon can reuse its own grouping rules. */
+export type CcsGroupRequest = {
+    domainId: string;
+    contestId: string;
+    teams: { uid: number; id: string; user: User }[];
+    groups: CcsGroupRule[];
+};
+
+declare module 'hydrooj' {
+    interface EventMap {
+        'hydro-ccs-api/groups': (request: CcsGroupRequest) => void | Promise<void>;
+    }
+}
 
 /** Read membership from domain groups, without relying on cached User.group. */
 export function ccsDomainGroups(groups: GDoc[], teamUids: ReadonlySet<number>) {

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Allow scoreboard addons to supply groups through `hydro-ccs-api/groups`, reusing their own school/cohort rules without duplicate account lists. Validate provider output and preserve native participation status, history and resume tokens on errors.
+- Use `scmu` for South-Central Minzu University in the group configuration example.
 - Automatically reuse current-domain Hydro user groups for participating team accounts, without duplicate CCS membership configuration or cached-user delays.
 - Keep native group IDs deterministic and CCS-safe, preserve participation status, and let native memberships override same-ID optional manual rules, including empty native groups.
 - Append resumable group and team changes on membership edits/removals; test both views, domain isolation, ID collisions, stable ordering and group-read failures.

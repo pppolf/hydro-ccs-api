@@ -29,7 +29,7 @@ API 基址为 `/api/ccs`，域内为 `/d/<domain>/api/ccs`。所有资源均为 
 | `/contests/:id/state` | 开始、结束、封榜、解封状态 |
 | `/contests/:id/access` | 本实现支持的实体字段；写入能力列表为空 |
 | `/contests/:id/teams` | 队伍、所属组织、组别及隐藏标记 |
-| `/contests/:id/groups` | `participants` 正式队、`observers` 打星队、当前域用户组及可选手动附加分组 |
+| `/contests/:id/groups` | `participants` 正式队、`observers` 打星队、当前域用户组、榜单插件提供的分组及可选手动分组 |
 | `/contests/:id/organizations` | 学校/组织 |
 | `/contests/:id/problems` | 题号、顺序、标题、气球 `color`/`rgb`、可确定时的测试点总数 `test_data_count` |
 | `/contests/:id/languages` | 语言 |
@@ -91,9 +91,25 @@ CCS 队伍 ID 使用 Hydro 队伍账号用户名，`team_id` 引用相同值；�
 
 分组 `name` 保留 Hydro 用户组名称。若组名满足 `[a-zA-Z0-9_.-]{1,36}`、不以 `-` / `.` 开头、不以 `.` 结尾，且不等于 `participants` / `observers`、不以 `hydro-group-` 开头，则直接作为 `id`；否则使用 `hydro-group-<用户组的24位ObjectId>`。这保证中文名称可用且不会覆盖内置分组，生成 ID 依赖该用户组文档的持久 ID。
 
-内置 `participants` / `observers` 的 ID 和含义保持不变。队伍 `group_ids` 第一项仍由 `unrank` 决定为 `participants` / `observers`，之后按 ID 排序追加所属域用户组，最后按配置顺序追加匹配的手动分组。学校分组与 `organization_id` 独立，组织 ID 映射不会改变用户组成员。
+内置 `participants` / `observers` 的 ID 和含义保持不变。队伍 `group_ids` 第一项仍由 `unrank` 决定为 `participants` / `observers`，之后按 ID 排序追加所属域用户组、榜单插件分组，最后按配置顺序追加匹配的手动分组。学校分组与 `organization_id` 独立，组织 ID 映射不会改变用户组成员。
 
 用户组增删成员会在下一次请求或轮询时生成队伍更新；最后一支本场队伍移出或组被删除后，输出该组的删除事件。用户组读取失败时返回 503，不提交部分状态或误删已有分组。
+
+### 榜单插件提供分组
+
+定制榜单可监听 Hydro 的 `hydro-ccs-api/groups` 事件，在每次快照中复用自己的分组函数。事件参数类型为 `src/groups.ts` 的 `CcsGroupRequest`：
+
+| 字段 | 含义 |
+| --- | --- |
+| `domainId` / `contestId` | 本次读取的比赛范围，插件可据此限制生效范围 |
+| `teams` | 本场有效队伍账号的 `{ uid, id, user }` 数组；`id` 为账号用户名，`user` 为当前 Hydro 用户对象，不含单独的团队成员条目 |
+| `groups` | 初始为空的可变数组；监听器向其中追加下节所列的分组规则，通常使用 `teams` 账号数组 |
+
+监听器可异步读取数据，CCS 等待完成后再提交快照。例如在现有榜单插件内部，用同一份分组标签和同一个归组函数构建 `{ id, name, teams }`，再执行 `request.groups.push(...groups)`。不要仅复制展示端标签；必须提供实际队伍成员关系。用户对象只在服务器内部使用，不会作为分组字段输出。
+
+插件提供的分组按 ID 排序，以稳定事件顺序。空 `teams` 仍导出该分组，可在报名之前准备展示配置。分组格式采用下节同一校验规则，不能覆盖 `participants` / `observers`；监听器抛错、输出无效或重复 ID 时返回 503，保留已经提交的历史和 token。
+
+同 ID 时优先级为 **域用户组 → 榜单插件 → 手动配置**。原生空用户组仍占用其 ID。清空手动配置不会关闭插件分组；卸载提供分组的插件后，其分组在下一次快照移除，已有同 ID 手动规则可重新生效。因此从手动名单迁移时建议清空旧规则。两种鉴权视图都调用相同事件，正式/打星身份及封榜策略保持不变。
 
 ### 可选手动分组
 

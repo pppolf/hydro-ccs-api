@@ -1,9 +1,9 @@
-import { ContestModel, getAlphabeticId, ObjectId, ProblemModel, RecordModel, SettingModel, UserModel } from 'hydrooj';
+import { ContestModel, getAlphabeticId, ObjectId, ProblemModel, RecordModel, SettingModel, UserModel, type Context } from 'hydrooj';
 import { digest, duration, entityKey, hydroVerdicts, judgementTypes, type CcsObject, type CcsState } from './core';
 import { addCcsRuns } from './runs';
 import { ccsOrganizationIds } from './organizations';
 import { ccsSetting } from './settings';
-import { ccsDomainGroups, ccsGroups, ccsTeamGroupIds, type CcsGroupRule } from './groups';
+import { ccsDomainGroups, ccsGroups, ccsTeamGroupIds, type CcsGroupRequest, type CcsGroupRule } from './groups';
 
 export class CcsError extends Error {
     constructor(public status: number, message: string) { super(message); }
@@ -32,7 +32,8 @@ export function contestObject(contest: any) {
         x_hydro_rules: 'HYDRO_ACM_V1', x_hydro_time_unit: 'seconds' };
 }
 
-export async function readHydroCcsState(domainId: string, tid: ObjectId, visibility: 'admin' | 'broadcast', previous: CcsState, now = new Date()) {
+export async function readHydroCcsState(domainId: string, tid: ObjectId, visibility: 'admin' | 'broadcast', previous: CcsState,
+    now = new Date(), ctx?: Pick<Context, 'parallel'>) {
     const contest = await getCcsContest(domainId, tid);
     let organizationIds: Map<string, string>;
     try { organizationIds = ccsOrganizationIds(ccsSetting('organizationIds')); }
@@ -51,6 +52,19 @@ export async function readHydroCcsState(domainId: string, tid: ObjectId, visibil
     const uids = [...new Set<number>(participants.flatMap(row => [row.uid, ...(row.members || [])]).concat(records.map(row => row.uid)))];
     const users = uids.length ? await UserModel.getList(domainId, uids) : {};
     const teamUids = new Set<number>(participants.filter(row => users[row.uid]?._id === row.uid && users[row.uid].uname).map(row => row.uid));
+    const extension: CcsGroupRequest = { domainId, contestId: String(tid),
+        teams: [...teamUids].map(uid => ({ uid, id: users[uid].uname, user: users[uid] })), groups: [] };
+    await ctx?.parallel('hydro-ccs-api/groups', extension);
+    let provided: CcsGroupRule[];
+    try {
+        if (!Array.isArray(extension.groups)) throw new Error('Expected group array');
+        provided = ccsGroups(JSON.stringify(extension.groups))
+            .filter(group => !group.contests || group.contests.includes(`${domainId}/${tid}`))
+            .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    }
+    catch { throw new CcsError(503, 'CCS group provider returned invalid groups'); }
+    const providedIds = new Set(provided.map(group => group.id));
+    groups = [...provided, ...groups.filter(group => !providedIds.has(group.id))];
     const nativeGroups = ccsDomainGroups(domainGroups, teamUids);
     // An existing domain group owns its membership even if it currently has
     // no contest teams; old manual lists must not re-add removed members.

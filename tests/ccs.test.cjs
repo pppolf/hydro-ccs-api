@@ -224,7 +224,7 @@ function fixture() {
     router.use(async (c, next) => { c.set('X-Test-Middleware', 'preserved'); await next(); });
     router.all('api', '/api/:op', c => { c.status = 400; c.body = { error: 'generic API', op: c.params.op }; });
     const ctx = { i18n: { load() {} }, effect: callback => { const dispose = callback(); if (typeof dispose === 'function') disposers.push(dispose); }, on: (event, callback) => { hooks[event] = callback; }, interval: () => {},
-        server: { router },
+        server: { router }, parallel: async (event, ...args) => { await hooks[event]?.(...args); },
         Route: (name, url, handler) => {
             routes.set(url, handler);
             router.all(name, url, async c => {
@@ -621,6 +621,93 @@ test('failed domain group reads do not erase existing group memberships or advan
     assert.equal(resumed.status, 200);
     assert.deepEqual(await collect(resumed.body), []);
     assert.deepEqual((await f.get('teams')).response.body.find(team => team.id === 'team01').group_ids, ['participants', 'besti_fresh']);
+});
+
+test('scoreboard group providers reuse live team metadata in both views and append resumable membership changes', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
+    const f = fixture();
+    t.after(f.dispose);
+    f.users[1]._udoc = { trccpc: { school: 'SCMU' } };
+    f.users[4]._udoc = { trccpc: { school: 'SCMU' } };
+    f.settings.groups = JSON.stringify([{ id: 'scmu', name: 'Stale manual group', teams: ['Team02'] }]);
+    f.ctx.on('hydro-ccs-api/groups', request => {
+        assert.equal(request.contestId, tid);
+        assert.deepEqual(request.teams.map(team => team.uid), [1, 2, 4]);
+        if (request.domainId !== 'acm') return;
+        request.groups.push({ id: 'scmu', name: '中南民族大学',
+            teams: request.teams.filter(team => team.user._udoc?.trccpc?.school === 'SCMU').map(team => team.id) });
+    });
+    const history = [];
+    for (const admin of [false, true]) {
+        const groups = (await f.get('groups', admin)).response.body;
+        assert.deepEqual(groups.find(group => group.id === 'scmu'), { id: 'scmu', name: '中南民族大学', hidden: false });
+        const teams = (await f.get('teams', admin)).response.body;
+        assert.deepEqual(teams.map(team => [team.id, team.group_ids]), [
+            ['team01', ['participants', 'scmu']], ['Team02', ['participants']], ['star', ['observers', 'scmu']],
+        ]);
+        const feed = (await collect((await f.get('event-feed', admin, { stream: 'false' })).response.body)).map(JSON.parse);
+        assert.deepEqual(feed.filter(row => row.type === 'teams').map(row => row.data), teams);
+        assert.ok(feed.findIndex(row => row.type === 'groups' && row.id === 'scmu') < feed.findIndex(row => row.type === 'teams'));
+        assert.equal(JSON.stringify(feed).includes('trccpc'), false, 'provider metadata stays server-side');
+        assert.deepEqual((await f.get('scoreboard', admin, { group_id: 'scmu' })).response.body.rows.map(row => row.team_id), ['team01']);
+        history.push(feed);
+    }
+    f.users[1]._udoc.trccpc.school = 'BESTI';
+    f.users[2]._udoc = { trccpc: { school: 'SCMU' } };
+    for (const admin of [false, true]) {
+        const log = history[Number(admin)];
+        const delta = (await collect((await f.get('event-feed', admin, { stream: 'false', since_token: log.at(-1).token })).response.body)).map(JSON.parse);
+        assert.deepEqual(delta.map(row => [row.type, row.id, row.data.group_ids]), [
+            ['teams', 'team01', ['participants']], ['teams', 'Team02', ['participants', 'scmu']],
+        ]);
+        assert.deepEqual((await collect((await f.get('event-feed', admin, { stream: 'false' })).response.body)).map(JSON.parse), [...log, ...delta]);
+    }
+    f.settings.groups = '';
+    const other = await f.load('source').readHydroCcsState('system', new ObjectId(tid), 'admin', new Map(), at(2000), f.ctx);
+    assert.equal(other.has('groups/scmu'), false);
+});
+
+test('native groups override provider membership, while provider unload removes only its own extra groups', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
+    const f = fixture();
+    t.after(f.dispose);
+    f.userGroups.push(domainGroup('shared', [1], 1), domainGroup('empty', [], 2));
+    f.ctx.on('hydro-ccs-api/groups', ({ groups }) => groups.push(
+        { id: 'shared', name: 'Provider shared', teams: ['Team02'] },
+        { id: 'empty', name: 'Provider empty', teams: ['Team02'] },
+        { id: 'derived', name: 'Derived group', teams: ['Team02'] },
+        { id: 'future', name: 'Other contest', teams: ['team01'], contests: [`acm/${oid(0, 99)}`] },
+    ));
+    assert.deepEqual((await f.get('teams')).response.body.map(team => team.group_ids), [
+        ['participants', 'shared'], ['participants', 'derived'], ['observers'],
+    ]);
+    assert.equal((await f.get('groups')).response.body.find(group => group.id === 'shared').name, 'shared');
+    const log = (await collect((await f.get('event-feed', false, { stream: 'false' })).response.body)).map(JSON.parse);
+    delete f.hooks['hydro-ccs-api/groups'];
+    const delta = (await collect((await f.get('event-feed', false, { stream: 'false', since_token: log.at(-1).token })).response.body)).map(JSON.parse);
+    assert.deepEqual(delta.map(row => [row.type, row.id, row.data?.group_ids ?? row.data]), [
+        ['groups', 'derived', null], ['teams', 'Team02', ['participants']],
+    ]);
+});
+
+test('provider failures and invalid output preserve published history and recover from the existing token', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: +at(2000) });
+    const f = fixture();
+    t.after(f.dispose);
+    const valid = ({ groups }) => groups.push({ id: 'derived', name: 'Derived group', teams: ['team01'] });
+    f.ctx.on('hydro-ccs-api/groups', valid);
+    const log = (await collect((await f.get('event-feed', false, { stream: 'false' })).response.body)).map(JSON.parse);
+    for (const handler of [
+        () => { throw new Error('group provider unavailable'); },
+        ({ groups }) => groups.push({ id: 'participants', name: 'Bad override', teams: ['star'] }),
+        ({ groups }) => { valid({ groups }); valid({ groups }); },
+        request => { request.groups = null; },
+    ]) {
+        f.ctx.on('hydro-ccs-api/groups', handler);
+        assert.equal((await f.get('event-feed', false, { stream: 'false' })).response.status, 503);
+        f.ctx.on('hydro-ccs-api/groups', valid);
+        assert.deepEqual(await collect((await f.get('event-feed', false, { stream: 'false', since_token: log.at(-1).token })).response.body), []);
+    }
 });
 
 test('JSON resources and NDJSON history both honor freeze, including re-locking; API key and broadcast tokens are isolated', async t => {

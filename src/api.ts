@@ -84,7 +84,7 @@ export function registerCcsApi(ctx: Context) {
         watched.set(scope, watch);
         const current = await store.refresh(scope, String(tid), visibility, previous => {
             if (disposed) throw new CcsError(503, 'CCS plugin is shutting down');
-            return readHydroCcsState(domainId, tid, visibility, previous);
+            return readHydroCcsState(domainId, tid, visibility, previous, new Date(), ctx);
         }, afterCurrent);
         if (current.revision > (revisions.get(scope) || 0)) {
             revisions.set(scope, current.revision);

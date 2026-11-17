@@ -89,6 +89,8 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 
 用户组名称如 `besti_fresh`、`cwnu` 可直接作为 CCS 分组 ID。中文或不符合 CCS ID 格式的名称保留原显示名，ID 自动使用 `hydro-group-<用户组ObjectId>`；`participants`、`observers` 以及以 `hydro-group-` 开头的组名也使用生成 ID，避免冲突。直播端需要填写 ID 时，以 `/groups` 返回值为准。
 
+定制榜单中显示的分组也可能由学校、入学年份等字段计算，并未存入 Hydro 用户组。这类插件可通过 [`hydro-ccs-api/groups` 扩展事件](docs/API.md#榜单插件提供分组)向 CCS 提供分组，与原榜单调用同一段规则；接入后无需另外维护用户组或填写 CCS 账号名单。正式/打星身份仍由 Hydro 比赛决定。
+
 `participants`（正式队伍）与 `observers`（打星队伍）自动保留，学校与年级作为附加分组。例如正式新生队的 `group_ids` 为 `["participants", "besti_fresh"]`，西华师大的打星队为 `["observers", "cwnu"]`。组织 ID `CWNU` 和分组 ID `cwnu` 各自独立，不必相同。“全部队伍”由展示端不限制分组实现，无需添加一个 `all` 组。
 
 直播端若另有 `isHidden` / `isOutOfContest` 配置，原 `participants` 保持 `false/false`，`observers` 保持 `false/true`；新增学校、年级分组使用相同 ID，设为 `false/false`。event-feed 的标准分组对象输出 `id`、`name`、`hidden`，所属关系在队伍的 `group_ids` 中。
@@ -105,7 +107,7 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
   { "id": "besti_fresh", "name": "北京电子科技学院新生", "teams": ["besti_new_01"] },
   { "id": "cwnu", "name": "西华师范大学", "schools": ["西华师范大学"] },
   { "id": "xju", "name": "新疆大学", "schools": ["新疆大学"] },
-  { "id": "scun", "name": "中南民族大学", "schools": ["中南民族大学"] }
+  { "id": "scmu", "name": "中南民族大学", "schools": ["中南民族大学"] }
 ]
 ```
 
@@ -113,7 +115,7 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 
 可为某个分组添加 `"contests": ["system/691000000000000000000001"]`，限定生效的域和比赛；省略则适用于所有比赛。多场比赛复用账号时，建议为年级名单限定比赛，避免旧名单影响后续比赛。
 
-与当前域用户组的导出 ID 相同时，以域用户组的名称和成员为准，旧手动名单不再参与匹配；即使该用户组暂时没有本场队伍，也不会回退到旧名单。不同 ID 的手动分组继续作为补充。不能覆盖 `participants` / `observers`；留空或 `[]` 只清除手动附加分组，不关闭域用户组同步。
+同 ID 时，依次优先使用域用户组、榜单插件提供的分组、此处手动配置。域用户组即使暂时没有本场队伍，也不会回退到旧名单。不同 ID 的手动分组继续作为补充。不能覆盖 `participants` / `observers`；留空或 `[]` 只清除手动附加分组，不关闭域用户组或榜单插件分组。
 
 ## 接口地址
 
